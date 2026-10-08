@@ -1,0 +1,101 @@
+name: tke-tools
+x-dojo-env: &dojo-env
+  DD_DATABASE_URL: postgresql://dojo:${DOJO_DB_PASSWORD}@dojo-db:5432/dojo
+  DD_CELERY_BROKER_URL: redis://valkey:6379/0
+  DD_CACHE_URL: redis://valkey:6379/1
+  DD_SECRET_KEY: ${DOJO_SECRET_KEY}
+  DD_CREDENTIAL_AES_256_KEY: ${DOJO_AES_KEY}
+  DD_ALLOWED_HOSTS: '*'
+  DD_DEBUG: 'False'
+  DD_CSRF_TRUSTED_ORIGINS: https://64.90.11.59:9443
+  DD_SESSION_COOKIE_SECURE: 'True'
+  DD_CSRF_COOKIE_SECURE: 'True'
+services:
+  sonar-db:
+    image: postgres:17.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: ${SONAR_DB_PASSWORD}
+      POSTGRES_DB: sonar
+    volumes: [sonar-db:/var/lib/postgresql/data]
+  sonarqube:
+    image: sonarqube:26.9.0.129388-community
+    restart: unless-stopped
+    depends_on: [sonar-db]
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonar-db:5432/sonar
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: ${SONAR_DB_PASSWORD}
+    ports: ['127.0.0.1:9000:9000']
+    volumes: [sonar-data:/opt/sonarqube/data, sonar-extensions:/opt/sonarqube/extensions, sonar-logs:/opt/sonarqube/logs]
+    mem_limit: 4g
+  dojo-db:
+    image: postgres:17.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dojo
+      POSTGRES_PASSWORD: ${DOJO_DB_PASSWORD}
+      POSTGRES_DB: dojo
+    volumes: [dojo-db:/var/lib/postgresql/data]
+  valkey:
+    image: valkey/valkey:8.1.3-alpine
+    restart: unless-stopped
+    volumes: [valkey:/data]
+  initializer:
+    image: defectdojo/defectdojo-django:3.4.0
+    depends_on: [dojo-db]
+    entrypoint: ['/wait-for-it.sh', 'dojo-db:5432', '--', '/entrypoint-initializer.sh']
+    environment:
+      <<: *dojo-env
+      DD_INITIALIZE: 'true'
+      DD_ADMIN_USER: admin
+      DD_ADMIN_PASSWORD: ${DOJO_ADMIN_PASSWORD}
+      DD_ADMIN_MAIL: admin@example.invalid
+  uwsgi:
+    image: defectdojo/defectdojo-django:3.4.0
+    restart: unless-stopped
+    depends_on:
+      initializer: {condition: service_completed_successfully}
+      valkey: {condition: service_started}
+    entrypoint: ['/wait-for-it.sh', 'dojo-db:5432', '-t', '60', '--', '/entrypoint-uwsgi.sh']
+    environment: *dojo-env
+    volumes: [dojo-media:/app/media]
+    mem_limit: 2g
+  dojo-nginx:
+    image: defectdojo/defectdojo-nginx:3.4.0
+    restart: unless-stopped
+    depends_on: [uwsgi]
+    environment:
+      DD_UWSGI_HOST: uwsgi
+      DD_UWSGI_PORT: '3031'
+    ports: ['127.0.0.1:8080:8080']
+    volumes: [dojo-media:/usr/share/nginx/html/media]
+  celeryworker:
+    image: defectdojo/defectdojo-django:3.4.0
+    restart: unless-stopped
+    depends_on:
+      initializer: {condition: service_completed_successfully}
+      valkey: {condition: service_started}
+    entrypoint: ['/wait-for-it.sh', 'dojo-db:5432', '-t', '60', '--', '/entrypoint-celery-worker.sh']
+    environment:
+      <<: *dojo-env
+      DD_CELERY_WORKER_CONCURRENCY: '2'
+    volumes: [dojo-media:/app/media]
+    mem_limit: 2g
+  celerybeat:
+    image: defectdojo/defectdojo-django:3.4.0
+    restart: unless-stopped
+    depends_on:
+      initializer: {condition: service_completed_successfully}
+      valkey: {condition: service_started}
+    entrypoint: ['/wait-for-it.sh', 'dojo-db:5432', '-t', '60', '--', '/entrypoint-celery-beat.sh']
+    environment: *dojo-env
+volumes:
+  sonar-db:
+  sonar-data:
+  sonar-extensions:
+  sonar-logs:
+  dojo-db:
+  dojo-media:
+  valkey:

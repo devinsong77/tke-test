@@ -1,0 +1,20 @@
+[Unit]
+Description=TKE Governance API
+After=network.target
+[Service]
+User=tke
+Group=tke
+WorkingDirectory=/opt/tke-governance/src
+Environment=DATA_DIR=/opt/tke-governance/data
+Environment=CONFIG_DIR=/opt/tke-governance/config
+ExecStart=/opt/tke-governance/venv/bin/uvicorn app.api:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/tke-governance/data
+UMask=0007
+[Install]
+WantedBy=multi-user.target

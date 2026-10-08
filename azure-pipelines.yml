@@ -1,0 +1,62 @@
+trigger:
+  branches:
+    include: [main, 'acceptance/*']
+pr: none
+pool:
+  vmImage: ubuntu-latest
+stages:
+- stage: Build
+  jobs:
+  - job: BuildAndTest
+    steps:
+    - checkout: self
+      fetchDepth: 0
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.12'
+    - script: |
+        python -m pip install -r requirements-dev.txt
+        python -m pytest -q
+        mkdir -p $(Build.ArtifactStagingDirectory)/app
+        cp -r app requirements.txt $(Build.ArtifactStagingDirectory)/app/
+      displayName: Build and test application
+    - publish: $(Build.ArtifactStagingDirectory)/app
+      artifact: candidate-build
+- stage: SecurityGate
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - job: Review
+    timeoutInMinutes: 35
+    steps:
+    - checkout: self
+    - task: DownloadSecureFile@1
+      name: gateCA
+      inputs:
+        secureFile: tke-gate-ca.crt
+      displayName: Load trusted Gate certificate
+    - script: python3 scripts/gate_client.py
+      name: gate
+      displayName: Submit review and wait for server decision
+      env:
+        GATE_URL: $(GATE_URL)
+        GATE_TOKEN: $(GATE_TOKEN)
+        GATE_HMAC_KEY: $(GATE_HMAC_KEY)
+        GATE_CA_FILE: $(gateCA.secureFilePath)
+        GATE_REPOSITORY: tke-test
+        ADO_RUN_URL: $(System.CollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)
+    - publish: gate-evidence
+      artifact: gate-evidence
+      condition: always()
+- stage: Publish
+  dependsOn: [Build, SecurityGate]
+  condition: and(succeeded(), eq(dependencies.SecurityGate.outputs['Review.gate.gatePassed'], 'true'))
+  jobs:
+  - job: PublishApprovedBuild
+    steps:
+    - checkout: none
+    - download: current
+      artifact: candidate-build
+    - publish: $(Pipeline.Workspace)/candidate-build
+      artifact: approved-release
+      displayName: Publish only the approved build

@@ -1,0 +1,23 @@
+[Unit]
+Description=TKE Governance Worker
+After=network.target docker.service
+Requires=docker.service
+[Service]
+User=tke-worker
+Group=tke
+SupplementaryGroups=docker
+WorkingDirectory=/opt/tke-governance/src
+Environment=DATA_DIR=/opt/tke-governance/data
+Environment=CONFIG_DIR=/opt/tke-governance/config
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/tke-governance/venv/bin/python -m app.worker
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/tke-governance/data
+UMask=0007
+[Install]
+WantedBy=multi-user.target

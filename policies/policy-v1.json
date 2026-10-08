@@ -1,0 +1,10 @@
+{
+  "version": "policy-v1",
+  "block_severities": ["HIGH", "CRITICAL"],
+  "block_any_secret": true,
+  "require_sonar_quality_gate": true,
+  "checkov_unrated_severity": "HIGH",
+  "trivy_db_max_age_hours": 72,
+  "required_tools": ["sonarqube", "checkov", "trivy", "gitleaks"],
+  "exceptions": []
+}

@@ -1,0 +1,174 @@
+"""Authenticated review API. Scanner and policy execution live in the worker."""
+import hashlib
+import hmac
+import json
+import re
+import sqlite3
+import time
+import uuid
+from pathlib import Path
+from contextlib import asynccontextmanager
+from typing import Literal
+
+from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field
+from app import core
+
+
+@asynccontextmanager
+async def lifespan(app):
+    core.init_db()
+    yield
+
+
+app = FastAPI(title='TKE Security Governance API', version='1.0.0', lifespan=lifespan,
+              docs_url=None, redoc_url=None)
+
+
+class ReviewRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    repository: str = Field(min_length=1, max_length=100)
+    commit_sha: str = Field(pattern=r'^[0-9a-f]{40}$')
+    policy_version: Literal['policy-v1']
+    ado_run_id: str = Field(min_length=1, max_length=100)
+    ado_run_url: str = Field(pattern=r'^https://dev\.azure\.com/[^\s]+$', max_length=500)
+    ref: str = Field(default='refs/heads/main', pattern=r'^refs/heads/[a-zA-Z0-9_./-]+$', max_length=200)
+
+
+async def identity(request: Request):
+    clients = core.config('clients.json')
+    authorization = request.headers.get('authorization', '')
+    token = authorization.removeprefix('Bearer ')
+    for name, client in clients.items():
+        if authorization.startswith('Bearer ') and hmac.compare_digest(token, client['token']):
+            return name, client
+    raise HTTPException(401, 'Invalid credentials')
+
+
+def visible(row, client):
+    return json.loads(row['request'])['repository'] in client['repositories']
+
+
+@app.get('/healthz')
+def health():
+    with core.db() as con:
+        con.execute('SELECT 1').fetchone()
+    return {'status': 'ok', 'service': 'governance-api'}
+
+
+@app.post('/api/v1/reviews', status_code=202)
+async def create_review(request: Request, auth=Depends(identity)):
+    caller, client = auth
+    if client['role'] != 'pipeline':
+        raise HTTPException(403, 'Read-only principal')
+    raw = await request.body()
+    if len(raw) > 8192:
+        raise HTTPException(413, 'Request too large')
+    timestamp = request.headers.get('x-timestamp', '')
+    nonce = request.headers.get('x-nonce', '')
+    idem = request.headers.get('idempotency-key', '')
+    if not re.fullmatch(r'[a-zA-Z0-9:_-]{8,160}', idem) or not re.fullmatch(r'[0-9a-f]{32}', nonce):
+        raise HTTPException(400, 'Invalid idempotency key or nonce')
+    try:
+        if abs(time.time() - int(timestamp)) > 300:
+            raise ValueError()
+    except ValueError:
+        raise HTTPException(401, 'Request timestamp outside five-minute window')
+    body_hash = hashlib.sha256(raw).hexdigest()
+    message = f'POST\n/api/v1/reviews\n{timestamp}\n{nonce}\n{idem}\n{body_hash}'
+    expected = hmac.new(client['hmac_key'].encode(), message.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, request.headers.get('x-signature', '')):
+        raise HTTPException(401, 'Invalid request signature')
+    try:
+        payload = ReviewRequest.model_validate_json(raw).model_dump()
+    except ValueError:
+        raise HTTPException(422, 'Invalid review request schema')
+    repos = core.config('repositories.json')
+    if payload['repository'] not in client['repositories'] or payload['repository'] not in repos:
+        raise HTTPException(403, 'Repository not authorized')
+    repo = repos[payload['repository']]
+    if not payload['ado_run_url'].startswith(repo['ado_url_prefix']):
+        raise HTTPException(403, 'ADO organization/project mismatch')
+    if payload['policy_version'] != core.policy()['version']:
+        raise HTTPException(409, 'Policy version mismatch')
+    payload['policy_digest'] = core.digest(core.policy())
+    fingerprint = core.digest(payload)
+    now = time.time()
+    with core.db() as con:
+        con.execute('BEGIN IMMEDIATE')
+        con.execute('DELETE FROM nonces WHERE created < ?', (now - 600,))
+        try:
+            con.execute('INSERT INTO nonces VALUES (?,?,?)', (caller, nonce, now))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, 'Replay detected; use a fresh nonce')
+        existing = con.execute('SELECT * FROM reviews WHERE caller=? AND idem=?', (caller, idem)).fetchone()
+        if existing:
+            if existing['request_digest'] != fingerprint:
+                raise HTTPException(409, 'Idempotency key reused for a different request')
+            return {'review_id': existing['id'], 'status': existing['status'], 'reused': True}
+        count = con.execute("SELECT count(*) FROM reviews WHERE status IN ('queued','running')").fetchone()[0]
+        if count >= 20:
+            raise HTTPException(429, 'Review queue full')
+        rid = uuid.uuid4().hex
+        con.execute('INSERT INTO reviews(id,caller,idem,request_digest,request,status,created,updated) VALUES (?,?,?,?,?,?,?,?)',
+                    (rid, caller, idem, fingerprint, json.dumps(payload), 'queued', now, now))
+    core.audit(rid, 'review.created', {'caller': caller, 'commit_sha': payload['commit_sha'], 'request_digest': fingerprint})
+    return {'review_id': rid, 'status': 'queued', 'status_url': f'/api/v1/reviews/{rid}'}
+
+
+@app.get('/api/v1/reviews')
+def list_reviews(auth=Depends(identity)):
+    with core.db() as con:
+        rows = con.execute('SELECT * FROM reviews ORDER BY created DESC LIMIT 100').fetchall()
+    return {'reviews': [core.public_review(r) for r in rows if visible(r, auth[1])]}
+
+
+def get_row(rid, client):
+    with core.db() as con:
+        row = con.execute('SELECT * FROM reviews WHERE id=?', (rid,)).fetchone()
+    if row is None or not visible(row, client):
+        raise HTTPException(404, 'Review not found')
+    return row
+
+
+@app.get('/api/v1/reviews/{rid}')
+def get_review(rid: str, auth=Depends(identity)):
+    return core.public_review(get_row(rid, auth[1]))
+
+
+@app.get('/api/v1/reviews/{rid}/audit')
+def get_audit(rid: str, auth=Depends(identity)):
+    get_row(rid, auth[1])
+    with core.db() as con:
+        rows = con.execute('SELECT * FROM audit WHERE review_id=? ORDER BY sequence', (rid,)).fetchall()
+    return {'events': [dict(r) for r in rows]}
+
+
+@app.get('/api/v1/reviews/{rid}/artifacts/{name}')
+def artifact(rid: str, name: str, auth=Depends(identity)):
+    row = get_row(rid, auth[1])
+    result = json.loads(row['result'] or '{}')
+    if name not in result.get('artifacts', {}):
+        raise HTTPException(404, 'Artifact not found')
+    path = core.DATA / 'reviews' / rid / name
+    if not path.is_file() or path.is_symlink():
+        raise HTTPException(404, 'Artifact missing')
+    if hashlib.sha256(path.read_bytes()).hexdigest() != result['artifacts'][name]:
+        raise HTTPException(409, 'Artifact integrity check failed')
+    return FileResponse(path, media_type='application/json', filename=name)
+
+
+@app.middleware('http')
+async def headers(request, call_next):
+    response = await call_next(request)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'"
+    return response
+
+
+app.mount('/', StaticFiles(directory=Path(__file__).parent / 'static', html=True), name='dashboard')
