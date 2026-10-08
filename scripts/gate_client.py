@@ -67,13 +67,14 @@ def main():
                 raise RuntimeError('Polling failed three consecutive times')
             time.sleep(3)
             continue
-        if result.get('review_id') != rid or result.get('request', {}).get('commit_sha') != commit:
+        returned_request = result.get('request', {})
+        if result.get('review_id') != rid or any(returned_request.get(k) != v for k, v in payload.items()):
             raise RuntimeError('Review identity mismatch')
         status = result.get('status')
         print(f'GET review_id={rid} status={status}', flush=True)
         if status in ('PASS', 'BLOCK', 'ERROR'):
             decision = result.get('result') or {}
-            if decision.get('status') != status or decision.get('commit_sha') != commit or decision.get('policy_version') != 'policy-v1':
+            if decision.get('status') != status or decision.get('commit_sha') != commit or decision.get('policy_version') != 'policy-v1' or decision.get('policy_digest') != returned_request.get('policy_digest'):
                 raise RuntimeError('Terminal evidence mismatch')
             output = Path(os.environ.get('GATE_EVIDENCE_DIR', 'gate-evidence'))
             output.mkdir(parents=True, exist_ok=True)

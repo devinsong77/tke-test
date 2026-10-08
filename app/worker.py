@@ -58,7 +58,11 @@ def run(row):
             marker = core.CONFIG / 'faults' / request['commit_sha']
             fault = marker.read_text().strip() if marker.exists() else ''
             if fault == tool:
-                scan = {'status': 'failed', 'commit_sha': actual, 'error': 'Controlled scanner-unavailable fault injection', 'exit_code': 127}
+                exit_code, _, _ = scanners.docker(tool, source, rid, [], extra=['--entrypoint', '/nonexistent-controlled-fault'])
+                if exit_code == 0:
+                    raise RuntimeError('Fault injection unexpectedly succeeded')
+                scan = {'status': 'failed', 'commit_sha': actual, 'image': scanners.IMAGES[tool],
+                        'error': 'Controlled scanner startup failure (missing entrypoint)', 'exit_code': exit_code}
                 core.atomic_json(dest / f'{tool}-metadata.json', scan)
                 core.audit(rid, 'fault.injected', {'tool': tool, 'commit_sha': actual})
                 items = []
@@ -68,6 +72,8 @@ def run(row):
             findings += items
         for item in inventory:
             item['status'] = 'covered' if all(scans[t]['status'] == 'success' for t in item['required_tools']) else 'missing'
+            if 'sonarqube' in item['required_tools'] and item['path'] not in scans['sonarqube'].get('analyzed_files', []):
+                item['status'] = 'missing'
             if 'checkov' in item['required_tools'] and item['path'] not in scans['checkov'].get('checked_files', []):
                 item['status'] = 'missing'
             if 'trivy' in item['required_tools'] and not any(item['path'] in t for t in scans['trivy'].get('targets', [])):
@@ -121,10 +127,11 @@ def sync_dojo(row):
                     'unique_id_from_tool': f['fingerprint'], 'active': True, 'verified': False,
                     'static_finding': True, 'dynamic_finding': False} for f in result['findings'] if f['tool'] == tool]}
                 response = client.post('/api/v2/reimport-scan/', data={
-                    'engagement': str(state['engagement_id']), 'scan_type': 'Generic Findings Import',
+                    'engagement': str(state['engagement_id']), 'product_name': 'TKE Governance Pilot',
+                    'engagement_name': rid, 'scan_type': 'Generic Findings Import',
                     'test_title': f'{rid}-{tool}', 'minimum_severity': 'Info', 'close_old_findings': 'false',
                     'commit_hash': request['commit_sha'], 'build_id': request['ado_run_id'],
-                    'version': request['policy_version'], 'auto_create_context': 'false'},
+                    'version': request['policy_version'], 'auto_create_context': 'true'},
                     files={'file': (f'{tool}.json', json.dumps(generic).encode(), 'application/json')})
                 response.raise_for_status()
                 data = response.json()
@@ -133,7 +140,10 @@ def sync_dojo(row):
             state.update(status='synced' if required <= state['imports'].keys() else 'pending',
                          url=f'{settings["public_url"]}/engagement/{state["engagement_id"]}', error=None)
     except Exception as error:
-        state.update(status='pending_retry', error=f'{type(error).__name__}: import failed; inspect service logs',
+        detail = str(error)[:200]
+        if isinstance(error, httpx.HTTPStatusError):
+            detail = f'HTTP {error.response.status_code}: {error.response.text[:1000]}'
+        state.update(status='pending_retry', error=detail,
                      attempts=state.get('attempts', 0) + 1)
         state['retry_at'] = time.time() + min(300, 15 * 2 ** min(state['attempts'], 4))
     with core.db() as con:

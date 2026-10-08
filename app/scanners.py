@@ -34,13 +34,20 @@ def docker(tool, source, rid, args, *, network='none', extra=None, timeout=600, 
     name = f'tke-scan-{rid}-{tool}'
     cmd = ['docker', 'run', '--rm', '--name', name, '--label', 'tke.scanner=true',
            '--network', network, '--cap-drop=ALL', '--security-opt=no-new-privileges',
-           '--memory=2g', '--cpus=2', '--pids-limit=256', '--read-only',
-           '--tmpfs', '/tmp:rw,nosuid,nodev,size=1g', '-v', f'{source}:/src:ro', '-w', '/tmp']
+           '--user', f'{os.getuid()}:{os.getgid()}', '--memory=2g', '--cpus=2', '--pids-limit=256', '--read-only',
+           '--tmpfs', ('/tmp:rw,nosuid,nodev,exec,size=1g' if tool == 'sonarqube' else '/tmp:rw,nosuid,nodev,noexec,size=1g'), '-v', f'{source}:/src:ro', '-w', '/tmp']
     if extra:
         cmd += extra
     cmd += [IMAGES[tool]] + args
     try:
-        return execute(cmd, timeout=timeout, env=env)
+        result = execute(cmd, timeout=timeout, env=env)
+        diagnostics = {'exit_code': result[0], 'stdout_tail': result[1][-12000:], 'stderr_tail': result[2][-12000:]}
+        for secret in [v for k,v in (env or {}).items() if k in ('SONAR_TOKEN',)]:
+            diagnostics = {k: (v.replace(secret, '[REDACTED]') if isinstance(v, str) else v) for k,v in diagnostics.items()}
+        # Local operational log only, never exposed by the artifact API.
+        if result[0] not in (0, 10):
+            core.atomic_json(core.DATA / 'diagnostics' / f'{rid}-{tool}.json', diagnostics)
+        return result
     finally:
         execute(['docker', 'rm', '-f', name], timeout=30)
 
@@ -61,7 +68,7 @@ def scan_gitleaks(src, dest, rid, request, policy):
     exits = []
     for mode in ('git', 'dir'):
         code, out, _ = docker('gitleaks', src, rid,
-            [mode, '/src', '--redact=100', '--ignore-gitleaks-allow', '--report-format=json',
+            [mode, '/src', *(['--log-opts=' + request['commit_sha']] if mode == 'git' else []), '--redact=100', '--ignore-gitleaks-allow', '--report-format=json',
              '--report-path=/dev/stdout', '--exit-code=10', '--no-banner'])
         if code not in (0, 10):
             raise RuntimeError(f'Gitleaks {mode} failed (exit {code})')
@@ -82,7 +89,7 @@ def scan_gitleaks(src, dest, rid, request, policy):
 def scan_checkov(src, dest, rid, request, policy):
     code, out, _ = docker('checkov', src, rid,
         ['--directory', '/src', '--framework', 'dockerfile', 'terraform', 'kubernetes', 'github_actions',
-         '--output', 'json', '--quiet', '--skip-download', '--download-external-modules', 'false'])
+         '--output', 'json', '--skip-download', '--download-external-modules', 'false'])
     if code not in (0, 1):
         raise RuntimeError(f'Checkov failed (exit {code})')
     report = json.loads(out)
@@ -178,13 +185,23 @@ def scan_sonar(src, dest, rid, request, policy):
             if len(issues) >= data['paging']['total']:
                 break
             page += 1
-        core.atomic_json(dest / 'sonarqube.json', {'analysis': analysis, 'task': task, 'quality_gate': quality, 'issues': issues})
+        files = []
+        page = 1
+        while True:
+            response = client.get('/api/components/tree', params={'component': project, 'qualifiers': 'FIL', 'ps': 500, 'p': page})
+            response.raise_for_status()
+            page_data = response.json()
+            files.extend(x['path'] for x in page_data['components'])
+            if len(files) >= page_data['paging']['total']:
+                break
+            page += 1
+        core.atomic_json(dest / 'sonarqube.json', {'analysis': analysis, 'task': task, 'quality_gate': quality, 'issues': issues, 'analyzed_files': files})
         severity = {'BLOCKER': 'CRITICAL', 'CRITICAL': 'HIGH', 'MAJOR': 'MEDIUM', 'MINOR': 'LOW', 'INFO': 'INFO'}
         findings = [finding('sonarqube', x['rule'], severity.get(x.get('severity'), 'MEDIUM'), x['message'],
                             x.get('component', '').removeprefix(project + ':'), x.get('line', 0),
                             remediation='Review the Sonar rule and resolve the issue.') for x in issues]
         return {'exit_code': code, 'analysis_id': analysis_id, 'quality_gate': quality['status'],
-                'project_key': project, 'revision': analysis['revision']}, findings
+                'project_key': project, 'revision': analysis['revision'], 'analyzed_files': files}, findings
 
 
 def inventory(source):
