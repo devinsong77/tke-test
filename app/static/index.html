@@ -10,7 +10,7 @@
 <body>
 <div class="app">
   <aside class="sidebar">
-    <a class="brand" href="#reviews">TKE<span>Governance</span></a>
+    <a class="brand" href="#reviews"><span class="brand-mark" aria-hidden="true">T</span><span class="brand-name">TKE<span>Delivery governance</span></span></a>
     <nav aria-label="Primary">
       <button class="nav-item" id="nav-reviews">
         <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 1.5l6 3.5v6L8 14.5 2 11V5z"/><path d="M8 1.5V8m0 0l6-3.5M8 8L2 4.5" stroke="#fff" stroke-width="1.4" fill="none"/></svg>
@@ -21,6 +21,7 @@
         Components
       </button>
     </nav>
+    <div class="sidebar-note"><span class="eyebrow">Release policy</span><strong>Only PASS continues.</strong><p>Every decision backed by scanner evidence.</p></div>
   </aside>
 
   <main class="main">
@@ -29,21 +30,28 @@
     <!-- ============ Reviews overview ============ -->
     <div id="view-reviews">
       <div class="page-head">
-        <h1>Reviews</h1>
+        <div><span class="eyebrow">Security delivery</span><h1>Reviews</h1><p class="page-description">Trace every release from commit to decision.</p></div>
         <button id="refresh" class="btn">Refresh</button>
       </div>
+      <section id="latest-review" class="latest-review" aria-label="Latest pipeline review" hidden></section>
       <section class="stats" id="metrics" aria-label="Review statistics"></section>
-      <section class="card">
+      <section class="card reviews-card">
+        <div class="list-tools">
+          <label class="search-field"><span class="sr-only">Search reviews</span><input id="review-search" type="search" placeholder="Search run, repository, commit…"></label>
+          <label><span class="sr-only">Decision filter</span><select id="decision-filter"><option value="all">All decisions</option><option>PASS</option><option>BLOCK</option><option>ERROR</option><option value="running">Running</option><option value="queued">Queued</option></select></label>
+          <label><span class="sr-only">Source filter</span><select id="source-filter"><option value="all">All sources</option><option value="pipeline">Azure Pipelines</option><option value="host">Host tests</option></select></label>
+        </div>
         <div class="table-wrap">
           <table class="tbl">
             <thead><tr>
-              <th>Decision</th><th>Repository</th><th>Review</th>
+              <th>Decision</th><th>Review / source</th><th>Repository / commit</th>
               <th>Duration</th><th>Dojo sync</th><th>Created</th>
             </tr></thead>
             <tbody id="reviews"></tbody>
           </table>
         </div>
-        <p id="empty" class="muted" hidden>No reviews yet.</p>
+        <div id="empty" class="empty-state" hidden><strong>No matching reviews</strong><p>Try another search or clear the filters.</p><button id="clear-filters" class="btn">Clear filters</button></div>
+        <div class="list-footer"><span id="list-count" role="status"></span><div><button id="prev-page" class="btn" aria-label="Previous page">← Previous</button><button id="next-page" class="btn" aria-label="Next page">Next →</button></div></div>
       </section>
       <p class="muted meta-line" id="updated"></p>
     </div>
@@ -64,13 +72,13 @@
         </div>
       </div>
       <nav class="tabs" id="detail-tabs" role="tablist" aria-label="Review sections"></nav>
-      <div id="detail-panel"></div>
+      <div id="detail-panel" role="tabpanel" aria-live="polite"></div>
     </div>
 
     <!-- ============ Components ============ -->
     <div id="view-components" hidden>
       <div class="page-head">
-        <h1>Components</h1>
+        <div><span class="eyebrow">Platform status</span><h1>Components</h1><p class="page-description">Current service health, separate from historical scan results.</p></div>
         <div class="head-actions">
           <span class="muted meta-line" id="comp-updated"></span>
           <button id="comp-refresh" class="btn">Refresh</button>
@@ -89,14 +97,14 @@
     <div class="ai-panel-inner">
     <header class="ai-panel-head">
       <div class="ai-panel-title">
-        <h2>AI Analyst</h2>
+        <span class="analyst-symbol" aria-hidden="true">✦</span><div><h2>AI Analyst</h2><span class="analyst-subtitle">Evidence, explained</span></div>
       </div>
     </header>
     <div class="ai-panel-body">
       <section class="chat" aria-label="Analyst chat">
-        <div class="chat-log" id="chat-log"></div>
+        <div class="chat-log" id="chat-log" aria-live="polite"></div>
         <form class="chat-form" id="chat-form">
-          <input id="chat-input" type="text" placeholder="Ask about anything on this page…" autocomplete="off" maxlength="2000" aria-label="Ask about this review">
+          <input id="chat-input" type="text" placeholder="Ask about this review…" autocomplete="off" maxlength="2000" aria-label="Ask about this review">
           <button class="btn btn-primary" type="submit" id="chat-send">Send</button>
         </form>
       </section>
@@ -113,7 +121,7 @@
       <header class="modal-head">
         <strong id="preview-title" class="mono"></strong>
         <div>
-          <button id="preview-download" class="btn">Download</button>
+          <button id="preview-download" class="btn" disabled>Download original</button>
           <button id="preview-close" class="icon-btn" aria-label="Close">✕</button>
         </div>
       </header>
