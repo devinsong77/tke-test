@@ -1,6 +1,6 @@
 'use strict';
 /* TKE Governance Lab dashboard — read-only review explorer + AI analyst. */
-let token = '', selected = null, busy = false, analysisTimer = null;
+let selected = null, busy = false, analysisTimer = null, activeTab = 'overview';
 
 const $ = id => document.getElementById(id);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -41,7 +41,7 @@ function md(src){
 
 /* ---------- api ---------- */
 async function api(path, opts = {}){
-  const r = await fetch(path, {headers:{Authorization:`Bearer ${token}`}, ...opts});
+  const r = await fetch(path, opts);
   if(!r.ok) throw new Error(`Request failed (${r.status}). Check access or service health.`);
   return r.json();
 }
@@ -49,11 +49,10 @@ function showError(msg){ const m = $('message'); m.hidden = !msg; m.textContent 
 
 /* ---------- list view ---------- */
 async function refresh(){
-  if(!token || busy) return; busy = true;
+  if(busy) return; busy = true;
   try{
     const data = await api('/api/v1/reviews');
     showError('');
-    $('login').hidden = true; $('workspace').hidden = false;
     const rs = data.reviews || [];
     const n = s => rs.filter(x => x.status === s).length;
     $('metrics').innerHTML = [
@@ -90,9 +89,10 @@ function timeline(status){
 }
 
 /* ---------- detail view ---------- */
-async function details(id, keepScroll){
+async function details(id, keepScroll, initialTab){
   if(analysisTimer){ clearInterval(analysisTimer); analysisTimer = null; }
   selected = id;
+  activeTab = initialTab || 'overview';
   const r = await api(`/api/v1/reviews/${encodeURIComponent(id)}`);
   const d = r.result || {};
   const el = $('detail');
@@ -100,38 +100,26 @@ async function details(id, keepScroll){
   const inv = d.inventory || [], covered = inv.filter(x => x.status === 'covered').length;
   const findings = d.findings || [];
 
-  el.innerHTML = `
-  <div class="detail-top">
-    <div><p class="eyebrow">Review detail</p>
-      <h2>${badge(r.status)}&nbsp;&nbsp;${esc(r.request.repository)}</h2>
-      <div class="review-id">${esc(r.review_id)}</div>
-    </div>
-    <div class="detail-actions">
-      <button class="btn btn-ghost btn-sm" id="copy-link">Copy link</button>
-      <button class="btn btn-ghost btn-sm" id="copy-curl">Copy curl</button>
-    </div>
-  </div>
+  const tabs = [
+    ['overview', 'Overview'],
+    ['findings', `Findings${findings.length ? ` (${findings.length})` : ''}`],
+    ['scanners', 'Scanners'],
+    ['coverage', 'Coverage'],
+    ['analyst', 'AI Analyst'],
+    ['evidence', 'Evidence'],
+  ];
+
+  const tabOverview = `
   ${timeline(r.status)}
   <div class="reason">${esc((d.reasons || ['Review is waiting for a terminal decision.']).join(' · '))}</div>
   <div class="kv-grid">
     <div class="kv"><span>Commit / policy</span><code>${esc(r.request.commit_sha)}</code><div class="small muted" style="margin-top:6px">${esc(r.request.policy_version)} · ${esc((r.request.policy_digest || '').slice(0, 16))}</div></div>
     <div class="kv"><span>Pipeline provenance</span><a href="${esc(r.request.ado_run_url)}" target="_blank" rel="noopener noreferrer">Azure DevOps run ${esc(r.request.ado_run_id)} ↗</a></div>
-  </div>
+    <div class="kv"><span>DefectDojo</span>${badge(r.dojo?.status || 'pending')} <span class="small muted">${esc(r.dojo?.error || '')}</span>
+    ${r.dojo?.url ? `<a href="${esc(r.dojo.url)}" target="_blank" rel="noopener noreferrer">Open engagement ↗</a>` : ''}</div>
+  </div>`;
 
-  <h3>Scanner execution</h3>
-  <div class="table-wrap"><table class="tbl"><thead><tr><th>Tool</th><th>Status</th><th>Duration</th><th>Evidence / outcome</th></tr></thead>
-  <tbody>${Object.entries(d.scanners || {}).map(([name, s]) => `<tr>
-    <td><strong>${esc(name)}</strong><small>${esc(s.image || '')}</small></td>
-    <td>${badge(s.status)}</td>
-    <td>${s.duration_seconds != null ? esc(s.duration_seconds) + 's' : '—'}</td>
-    <td class="small">${esc(s.error || `Exit ${JSON.stringify(s.exit_code)}${s.quality_gate ? ' · Quality Gate ' + s.quality_gate : ''}`)}</td>
-  </tr>`).join('')}</tbody></table></div>
-
-  <h3>Coverage · ${covered}/${inv.length} objects</h3>
-  <div class="table-wrap"><table class="tbl"><thead><tr><th>Input</th><th>Required scans</th><th>Status</th></tr></thead>
-  <tbody>${inv.map(x => `<tr><td><code>${esc(x.path)}</code></td><td class="small">${esc((x.required_tools || []).join(', '))}</td><td>${badge(x.status)}</td></tr>`).join('')}</tbody></table></div>
-
-  <h3>Findings · ${findings.length}</h3>
+  const tabFindings = `
   <div class="fbar" id="fbar">
     ${['ALL','CRITICAL','HIGH','MEDIUM','LOW'].map(s => `<button class="fbtn${s === 'ALL' ? ' on' : ''}" data-sev="${s}">${s[0] + s.slice(1).toLowerCase()}</button>`).join('')}
     <span class="fcount" id="fcount"></span>
@@ -140,12 +128,23 @@ async function details(id, keepScroll){
   <tbody>${findings.map(f => `<tr data-sevrow="${esc(f.severity)}"><td>${badge(f.severity)}</td>
     <td><strong>${esc(f.rule)}</strong> <span class="small muted">${esc(f.tool || '')}</span><small>${esc(f.title)}</small></td>
     <td><code>${esc(f.file)}:${esc(f.line)}</code><small>${esc(f.remediation)}</small></td></tr>`).join('')}</tbody></table></div>`
-    : '<p class="muted">No findings recorded. Coverage and scanner health remain part of the decision.</p>'}</div>
+    : '<p class="muted">No findings recorded. Coverage and scanner health remain part of the decision.</p>'}</div>`;
 
-  <h3>DefectDojo</h3>
-  <p>${badge(r.dojo?.status || 'pending')} <span class="small muted">${esc(r.dojo?.error || '')}</span>
-  ${r.dojo?.url ? `<a href="${esc(r.dojo.url)}" target="_blank" rel="noopener noreferrer">Open engagement ↗</a>` : ''}</p>
+  const tabScanners = `
+  <div class="table-wrap"><table class="tbl"><thead><tr><th>Tool</th><th>Status</th><th>Duration</th><th>Evidence / outcome</th></tr></thead>
+  <tbody>${Object.entries(d.scanners || {}).map(([name, s]) => `<tr>
+    <td><strong>${esc(name)}</strong><small>${esc(s.image || '')}</small></td>
+    <td>${badge(s.status)}</td>
+    <td>${s.duration_seconds != null ? esc(s.duration_seconds) + 's' : '—'}</td>
+    <td class="small">${esc(s.error || `Exit ${JSON.stringify(s.exit_code)}${s.quality_gate ? ' · Quality Gate ' + s.quality_gate : ''}`)}</td>
+  </tr>`).join('')}</tbody></table></div>`;
 
+  const tabCoverage = `
+  <p class="muted">Coverage · ${covered}/${inv.length} objects</p>
+  <div class="table-wrap"><table class="tbl"><thead><tr><th>Input</th><th>Required scans</th><th>Status</th></tr></thead>
+  <tbody>${inv.map(x => `<tr><td><code>${esc(x.path)}</code></td><td class="small">${esc((x.required_tools || []).join(', '))}</td><td>${badge(x.status)}</td></tr>`).join('')}</tbody></table></div>`;
+
+  const tabAnalyst = `
   <div class="ai-card">
     <div class="ai-head"><h3>AI analyst</h3><span class="ai-tag">Advisory only</span></div>
     <p class="small muted" style="margin:0">Generated automatically when the review reaches a terminal decision. Never part of the gate decision.</p>
@@ -159,18 +158,49 @@ async function details(id, keepScroll){
       </form>
       <p class="chat-hint">Read-only: the analyst can explain findings but cannot change the review or its decision.</p>
     </div>
-  </div>
+  </div>`;
 
-  <h3>Evidence artifacts</h3>
+  const tabEvidence = `
   <div class="chips">${Object.keys(d.artifacts || {}).map(n => `<button class="chip" data-artifact="${esc(n)}">↓ ${esc(n)}</button>`).join('')}
   <button class="chip" id="audit-btn">View audit trail</button></div>
   <pre id="audit-data" hidden></pre>`;
 
+  const panels = {overview: tabOverview, findings: tabFindings, scanners: tabScanners,
+                  coverage: tabCoverage, analyst: tabAnalyst, evidence: tabEvidence};
+
+  el.innerHTML = `
+  <div class="detail-top">
+    <div><p class="eyebrow">Review detail</p>
+      <h2>${badge(r.status)}&nbsp;&nbsp;${esc(r.request.repository)}</h2>
+      <div class="review-id">${esc(r.review_id)}</div>
+    </div>
+    <div class="detail-actions">
+      <button class="btn btn-ghost btn-sm" id="copy-link">Copy link</button>
+      <button class="btn btn-ghost btn-sm" id="copy-curl">Copy curl</button>
+    </div>
+  </div>
+  <nav class="tabs" role="tablist">
+    ${tabs.map(([key, label]) => `<button class="tab${key === activeTab ? ' on' : ''}" role="tab" data-tab="${key}">${label}</button>`).join('')}
+  </nav>
+  <div class="tab-panels">
+    ${tabs.map(([key]) => `<section class="tabpanel" data-panel="${key}"${key === activeTab ? '' : ' hidden'}>${panels[key]}</section>`).join('')}
+  </div>`;
+
   if(!keepScroll) el.scrollIntoView({behavior:'smooth', block:'start'});
-  loadAnalysis(id);
-  loadChat(id);
+  if(activeTab === 'analyst'){ loadAnalysis(id); loadChat(id); }
+  filterFindings('ALL');
 }
 
+/* ---------- tab switching ---------- */
+function switchTab(tab){
+  if(!selected) return;
+  activeTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === tab));
+  document.querySelectorAll('.tabpanel').forEach(p => { p.hidden = p.dataset.panel !== tab; });
+  history.replaceState(null, '', '#review-' + selected + (tab === 'overview' ? '' : '/' + tab));
+  if(tab === 'analyst'){ loadAnalysis(selected); loadChat(selected); }
+  if(tab === 'findings'){ filterFindings('ALL'); }
+}
 /* ---------- AI analysis (auto-generated server-side) ---------- */
 async function loadAnalysis(id, attempt = 0){
   const box = $('ai-body');
@@ -229,7 +259,7 @@ async function sendChat(message){
   input.value = ''; input.disabled = true; btn.disabled = true;
   try{
     const r = await fetch(`/api/v1/reviews/${encodeURIComponent(selected)}/chat`, {
-      method:'POST', headers:{'Authorization':`Bearer ${token}`, 'Content-Type':'application/json'},
+      method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({message, history}),
     });
     if(!r.ok) throw new Error(`Chat failed (${r.status})`);
@@ -258,14 +288,11 @@ function filterFindings(sev){
 }
 
 /* ---------- events ---------- */
-$('login-form').addEventListener('submit', e => {
-  e.preventDefault();
-  token = $('token').value.trim(); $('token').value = '';
-  refresh();
-});
 $('refresh').addEventListener('click', refresh);
 $('nav-reviews').addEventListener('click', () => { selected = null; $('detail').hidden = true; refresh(); });
 document.addEventListener('click', async e => {
+  const tab = e.target.closest?.('.tab');
+  if(tab && selected){ switchTab(tab.dataset.tab); return; }
   const fbtn = e.target.closest?.('.fbtn');
   if(fbtn && selected){ filterFindings(fbtn.dataset.sev); return; }
   if(e.target?.id === 'copy-link'){
@@ -275,7 +302,7 @@ document.addEventListener('click', async e => {
     setTimeout(() => e.target.textContent = 'Copy link', 1500); return;
   }
   if(e.target?.id === 'copy-curl'){
-    const cmd = `curl -sk -H "Authorization: Bearer $TOKEN" "${location.origin}/api/v1/reviews/${selected}" | python3 -m json.tool`;
+    const cmd = `curl -sk "${location.origin}/api/v1/reviews/${selected}" | python3 -m json.tool`;
     try{ await navigator.clipboard.writeText(cmd); e.target.textContent = 'Copied!'; }
     catch{ prompt('Copy curl:', cmd); return; }
     setTimeout(() => e.target.textContent = 'Copy curl', 1500); return;
@@ -306,13 +333,12 @@ document.addEventListener('submit', e => {
   }
 });
 
-// deep link: #review-<id>
-if(location.hash.startsWith('#review-')){
-  const id = location.hash.slice(8);
-  const t = setInterval(() => {
-    if(token){ clearInterval(t); details(id).catch(() => {}); }
-  }, 500);
-  setTimeout(() => clearInterval(t), 30000);
+// deep link: #review-<id>[/<tab>]
+function parseHash(){
+  const m = location.hash.match(/^#review-([0-9a-f]+)(?:\/([a-z]+))?/);
+  return m ? {id: m[1], tab: m[2] || 'overview'} : null;
 }
+const _dl = parseHash();
+if(_dl) details(_dl.id, false, _dl.tab).catch(() => {});
 
 setInterval(refresh, 15000);

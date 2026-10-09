@@ -41,7 +41,8 @@ def signed(data=None, idem='test-idempotency', timestamp=None):
 
 
 def test_auth_and_read_only(setup):
-    assert setup.get('/api/v1/reviews').status_code == 401
+    # Dashboard read endpoints are public (no token required)
+    assert setup.get('/api/v1/reviews').status_code == 200
     assert setup.post('/api/v1/reviews', headers={'Authorization': 'Bearer read-token'}, json=payload()).status_code == 403
 
 

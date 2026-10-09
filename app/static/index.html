@@ -39,21 +39,9 @@
       <span class="pill">Fail-closed by design</span>
     </section>
 
-    <section id="login" class="card login-card">
-      <h2>Access your reviews</h2>
-      <p class="muted">Use your read-only access token. It stays in this tab&rsquo;s memory and is never stored.</p>
-      <form id="login-form">
-        <label for="token">Access token</label>
-        <div class="login-row">
-          <input id="token" type="password" autocomplete="off" required placeholder="Paste your access token">
-          <button class="btn btn-primary" type="submit">Connect</button>
-        </div>
-      </form>
-    </section>
-
     <div id="message" class="alert" role="status" aria-live="polite" hidden></div>
 
-    <div id="workspace" hidden>
+    <div id="workspace">
       <section class="stats" id="metrics" aria-label="Review statistics"></section>
 
       <section class="card">

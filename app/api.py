@@ -47,6 +47,23 @@ async def identity(request: Request):
     raise HTTPException(401, 'Invalid credentials')
 
 
+async def optional_identity(request: Request):
+    """Authentication is optional for public read-only dashboard endpoints.
+
+    Returns (name, client) when a valid Bearer token is present, else None.
+    Write operations (POST /api/v1/reviews) still require identity.
+    """
+    authorization = request.headers.get('authorization', '')
+    if not authorization.startswith('Bearer '):
+        return None
+    token = authorization.removeprefix('Bearer ')
+    clients = core.config('clients.json')
+    for name, client in clients.items():
+        if hmac.compare_digest(token, client['token']):
+            return name, client
+    return None
+
+
 def visible(row, client):
     return json.loads(row['request'])['repository'] in client['repositories']
 
@@ -119,36 +136,40 @@ async def create_review(request: Request, auth=Depends(identity)):
 
 
 @app.get('/api/v1/reviews')
-def list_reviews(auth=Depends(identity)):
+def list_reviews(auth=Depends(optional_identity)):
     with core.db() as con:
         rows = con.execute('SELECT * FROM reviews ORDER BY created DESC LIMIT 100').fetchall()
+    if auth is None:
+        return {'reviews': [core.public_review(r) for r in rows]}
     return {'reviews': [core.public_review(r) for r in rows if visible(r, auth[1])]}
 
 
 def get_row(rid, client):
     with core.db() as con:
         row = con.execute('SELECT * FROM reviews WHERE id=?', (rid,)).fetchone()
-    if row is None or not visible(row, client):
+    # Public dashboard access (client is None) can see all reviews;
+    # authenticated callers are still scoped to their repositories.
+    if row is None or (client is not None and not visible(row, client)):
         raise HTTPException(404, 'Review not found')
     return row
 
 
 @app.get('/api/v1/reviews/{rid}')
-def get_review(rid: str, auth=Depends(identity)):
-    return core.public_review(get_row(rid, auth[1]))
+def get_review(rid: str, auth=Depends(optional_identity)):
+    return core.public_review(get_row(rid, auth[1] if auth else None))
 
 
 @app.get('/api/v1/reviews/{rid}/audit')
-def get_audit(rid: str, auth=Depends(identity)):
-    get_row(rid, auth[1])
+def get_audit(rid: str, auth=Depends(optional_identity)):
+    get_row(rid, auth[1] if auth else None)
     with core.db() as con:
         rows = con.execute('SELECT * FROM audit WHERE review_id=? ORDER BY sequence', (rid,)).fetchall()
     return {'events': [dict(r) for r in rows]}
 
 
 @app.get('/api/v1/reviews/{rid}/artifacts/{name}')
-def artifact(rid: str, name: str, auth=Depends(identity)):
-    row = get_row(rid, auth[1])
+def artifact(rid: str, name: str, auth=Depends(optional_identity)):
+    row = get_row(rid, auth[1] if auth else None)
     result = json.loads(row['result'] or '{}')
     if name not in result.get('artifacts', {}):
         raise HTTPException(404, 'Artifact not found')
@@ -176,8 +197,8 @@ def request_analysis(rid: str, auth=Depends(identity)):
 
 
 @app.get('/api/v1/reviews/{rid}/analysis')
-def get_analysis(rid: str, auth=Depends(identity)):
-    get_row(rid, auth[1])
+def get_analysis(rid: str, auth=Depends(optional_identity)):
+    get_row(rid, auth[1] if auth else None)
     from app import analyst
     analysis = analyst.get_cached(rid)
     if analysis is None:
@@ -186,13 +207,13 @@ def get_analysis(rid: str, auth=Depends(identity)):
 
 
 @app.post('/api/v1/reviews/{rid}/chat')
-async def chat_with_analyst(rid: str, request: Request, auth=Depends(identity)):
+async def chat_with_analyst(rid: str, request: Request, auth=Depends(optional_identity)):
     """Ask a follow-up question about a review's findings.
 
     Read-only: the conversation is grounded on findings data and can never
     modify the review, its decision, or any finding.
     """
-    get_row(rid, auth[1])  # 404 if unknown / not visible to caller
+    get_row(rid, auth[1] if auth else None)  # 404 if unknown
     try:
         payload = await request.json()
     except Exception:
@@ -207,8 +228,8 @@ async def chat_with_analyst(rid: str, request: Request, auth=Depends(identity)):
 
 
 @app.get('/api/v1/reviews/{rid}/chat')
-def get_chat_history(rid: str, auth=Depends(identity)):
-    get_row(rid, auth[1])
+def get_chat_history(rid: str, auth=Depends(optional_identity)):
+    get_row(rid, auth[1] if auth else None)
     from app import analyst
     return {'review_id': rid, 'messages': analyst.get_chat(rid)}
 
