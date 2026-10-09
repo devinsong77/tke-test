@@ -58,10 +58,13 @@ with an explicit "advisory only" label.
 
 ## AI chat (advisory only)
 
-`POST /api/v1/reviews/{review_id}/chat` with `{"message": "...", "history": [...]}` asks
-a follow-up question grounded on that review's findings; `GET /api/v1/reviews/{review_id}/chat`
-returns the stored conversation. Read-only: the analyst explains findings but can never
-modify the review, its decision, or any finding. History is capped server-side.
+`POST /api/v1/reviews/{review_id}/chat` with `{"message": "...", "history": [...], "tab": "findings"}`
+asks a follow-up question grounded on the review's full context — decision and reasons,
+scanner outcomes, coverage summary, DefectDojo sync state, and findings. The optional
+`tab` field tells the analyst which dashboard tab the user is viewing. `GET
+/api/v1/reviews/{review_id}/chat` returns the stored conversation. Read-only: the analyst
+explains but can never modify the review, its decision, or any finding. History is capped
+server-side.
 
 ## Component health
 

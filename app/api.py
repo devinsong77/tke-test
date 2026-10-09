@@ -326,7 +326,8 @@ async def chat_with_analyst(rid: str, request: Request, auth=Depends(optional_id
         raise HTTPException(422, 'Invalid JSON body')
     from app import analyst
     try:
-        return analyst.chat(rid, payload.get('message'), payload.get('history'))
+        return analyst.chat(rid, payload.get('message'), payload.get('history'),
+                            tab=payload.get('tab'))
     except ValueError as e:
         raise HTTPException(409, str(e))
     except RuntimeError as e:

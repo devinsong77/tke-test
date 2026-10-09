@@ -96,15 +96,18 @@ def auto_generate(review_id):
 
 CHAT_SYSTEM_PROMPT = """You are a senior application security analyst answering follow-up questions
 about one specific automated security review. You are given the review's decision,
-reasons, scanner outcomes, and findings as JSON context.
+reasons, scanner outcomes, coverage, DefectDojo sync state, and findings as JSON context.
+You also know which dashboard tab the user is currently viewing.
 
 Rules:
-- Answer ONLY from the provided findings data. Do not invent findings, files, or severities.
+- Answer ONLY from the provided context data. Do not invent findings, files, severities, or sync states.
+- You can answer about ANY part of the review: why the decision is BLOCK/PASS/ERROR,
+  what each scanner found, coverage gaps, whether DefectDojo synced, remediation steps.
 - Keep answers concise (under 150 words unless the user asks for detail).
 - Do not reveal secret values (they are redacted in the input).
 - You are read-only: you cannot change the review, its decision, or any finding.
   If asked to change something, explain you can only explain, not modify.
-- If the question cannot be answered from the findings, say so plainly."""
+- If the question cannot be answered from the context, say so plainly."""
 
 
 def _llm_call(cfg, messages, max_tokens=800):
@@ -131,7 +134,33 @@ def _llm_call(cfg, messages, max_tokens=800):
     return text, body['model']
 
 
-def chat(review_id, message, history=None):
+def build_chat_context(result, dojo=None, tab=None):
+    """Rich context for follow-up chat: decision, scanners, coverage, Dojo, findings,
+    plus which dashboard tab the user is viewing so answers stay relevant."""
+    findings = result.get('findings', [])
+    scanners = {k: {'status': v.get('status'), 'error': v.get('error'),
+                    'duration_seconds': v.get('duration_seconds')}
+                for k, v in result.get('scanners', {}).items()}
+    inv = result.get('inventory', [])
+    uncovered = [x.get('path') for x in inv if x.get('status') != 'covered'][:20]
+    slim = [{'tool': f['tool'], 'rule': f['rule'], 'severity': f['severity'],
+             'title': f['title'], 'file': f['file'], 'line': f['line'],
+             'remediation': f['remediation']}
+            for f in findings[:80]]
+    return json.dumps({
+        'decision': result.get('status'),
+        'reasons': result.get('reasons'),
+        'viewing_tab': tab,
+        'scanners': scanners,
+        'coverage': {'covered': sum(1 for x in inv if x.get('status') == 'covered'),
+                     'total': len(inv), 'uncovered_inputs': uncovered},
+        'defectdojo': dojo,
+        'finding_count': len(findings),
+        'findings': slim,
+    }, indent=1)
+
+
+def chat(review_id, message, history=None, tab=None, dojo=None):
     """Answer a follow-up question grounded on the review's findings.
 
     Read-only: never modifies the review, decision, or findings. The
@@ -157,10 +186,10 @@ def chat(review_id, message, history=None):
     for h in history[-10:]:
         if isinstance(h, dict) and h.get('role') in ('user', 'assistant') and h.get('content'):
             clean_hist.append({'role': h['role'], 'content': str(h['content'])[:2000]})
-    context = build_prompt(json.loads(row['result']))
+    context = build_chat_context(json.loads(row['result']), dojo=json.loads(row['dojo'] or '{}') if row['dojo'] else None, tab=tab)
     messages = [
         {'role': 'system', 'content': CHAT_SYSTEM_PROMPT},
-        {'role': 'user', 'content': 'Review findings context:\n' + context},
+        {'role': 'user', 'content': 'Review context:\n' + context},
     ] + clean_hist + [
         {'role': 'user', 'content': message},
     ]

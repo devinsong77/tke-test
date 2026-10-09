@@ -59,7 +59,6 @@
           <div class="review-id" id="detail-rid"></div>
         </div>
         <div class="detail-actions">
-          <button id="ask-ai" class="btn btn-primary">Ask AI</button>
           <button id="copy-link" class="btn">Copy link</button>
           <button id="copy-curl" class="btn">Copy curl</button>
         </div>
@@ -83,27 +82,45 @@
     </div>
   </main>
 
-  <!-- ============ AI side panel ============ -->
-  <aside id="ai-panel" class="ai-panel" aria-hidden="true" aria-label="AI analyst">
+  <!-- ============ AI side panel (persistent, collapsible) ============ -->
+  <aside id="ai-panel" class="ai-panel" aria-label="AI analyst">
+    <button id="ai-collapse" class="ai-collapse" aria-label="Collapse panel" title="Collapse">‹</button>
+    <div class="ai-rail"><button class="ai-rail-btn" id="ai-expand" aria-label="Expand panel">AI ANALYST ›</button></div>
+    <div class="ai-panel-inner">
     <header class="ai-panel-head">
       <div class="ai-panel-title">
         <h2>AI Analyst</h2>
         <span class="ai-tag">Advisory only</span>
       </div>
-      <button id="ai-close" class="icon-btn" aria-label="Close panel">✕</button>
     </header>
     <div class="ai-panel-body">
       <section id="ai-brief" aria-label="Analyst brief"></section>
       <section class="chat" aria-label="Analyst chat">
         <div class="chat-log" id="chat-log"></div>
         <form class="chat-form" id="chat-form">
-          <input id="chat-input" type="text" placeholder="Ask about the findings…" autocomplete="off" maxlength="2000" aria-label="Ask about the findings">
+          <input id="chat-input" type="text" placeholder="Ask about anything on this page…" autocomplete="off" maxlength="2000" aria-label="Ask about this review">
           <button class="btn btn-primary" type="submit" id="chat-send">Send</button>
         </form>
       </section>
     </div>
+    </div>
   </aside>
   <div id="ai-scrim" class="scrim" hidden></div>
+  <button id="ai-fab" class="ai-fab" aria-label="Open AI analyst">AI</button>
+
+  <!-- ============ artifact preview modal ============ -->
+  <div id="preview-modal" class="modal" hidden role="dialog" aria-modal="true" aria-label="Artifact preview">
+    <div class="modal-box">
+      <header class="modal-head">
+        <strong id="preview-title" class="mono"></strong>
+        <div>
+          <button id="preview-download" class="btn">Download</button>
+          <button id="preview-close" class="icon-btn" aria-label="Close">✕</button>
+        </div>
+      </header>
+      <div id="preview-body" class="preview-body"></div>
+    </div>
+  </div>
 </div>
 </body>
 </html>

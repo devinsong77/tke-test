@@ -1,7 +1,7 @@
 'use strict';
-/* TKE Governance dashboard — GitHub-style: overview -> detail -> tabs, AI side panel. */
-let busy = false, compTimer = null, analysisTimer = null, detailTimer = null;
-let panelReview = null;
+/* TKE Governance dashboard — GitHub-style: overview -> detail -> tabs, persistent AI panel. */
+let busy = false, compTimer = null, detailTimer = null;
+let panelReview = null, chatMessages = [];
 
 const $ = id => document.getElementById(id);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -41,6 +41,23 @@ function md(src){
   return html || '<p class="muted">Empty response.</p>';
 }
 
+/* ---------- tiny JSON syntax highlighter (no deps) ---------- */
+function hlJson(src){
+  let s = esc(src);
+  s = s.replace(/(&quot;([^&]|&(?!quot;))*?&quot;)(\s*:)?/g, (m, q, _inner, colon) =>
+    colon ? `<span class="tok-b">${q}</span>:` : `<span class="tok-s">${q}</span>`);
+  s = s.replace(/\b(-?\d+\.?\d*(e[+-]?\d+)?)\b/g, '<span class="tok-n">$1</span>');
+  s = s.replace(/\b(true|false|null)\b/g, '<span class="tok-k">$1</span>');
+  return s;
+}
+function withLineNumbers(html){
+  const lines = html.split('\n');
+  if(lines.length && lines[lines.length - 1] === '') lines.pop();
+  const rows = lines.map((l, i) =>
+    `<tr><td class="ln">${i + 1}</td><td class="lc">${l || ' '}</td></tr>`).join('');
+  return `<table class="code-table">${rows}</table>`;
+}
+
 /* ---------- api ---------- */
 async function api(path, opts = {}){
   const r = await fetch(path, opts);
@@ -50,8 +67,8 @@ async function api(path, opts = {}){
 function showError(msg){ const m = $('message'); m.hidden = !msg; m.textContent = msg || ''; }
 
 /* ---------- router ---------- */
-const TABS = ['overview', 'findings', 'scanners', 'coverage', 'evidence'];
-const TAB_LABELS = {overview: 'Overview', findings: 'Findings', scanners: 'Scanners', coverage: 'Coverage', evidence: 'Evidence'};
+const TABS = ['overview', 'findings', 'coverage', 'evidence'];
+const TAB_LABELS = {overview: 'Overview', findings: 'Findings', coverage: 'Coverage', evidence: 'Evidence'};
 
 function nav(hash){ if(location.hash === hash) route(); else location.hash = hash; }
 function route(){
@@ -74,13 +91,13 @@ function setNav(view){
 }
 function showOnly(id){
   ['view-reviews', 'view-detail', 'view-components'].forEach(v => { $(v).hidden = v !== id; });
+  document.body.classList.toggle('has-detail', id === 'view-detail');
 }
 
 /* ---------- reviews overview ---------- */
 async function showReviews(fromRoute){
   clearTimers();
   setNav('reviews'); showOnly('view-reviews');
-  closePanel();
   if(!fromRoute && location.hash !== '#reviews') history.replaceState(null, '', '#reviews');
   await refreshList();
 }
@@ -109,20 +126,20 @@ async function refreshList(){
 }
 
 /* ---------- review detail ---------- */
-let detailId = null, detailTab = 'overview', detailData = null;
+let detailId = null, detailTab = 'overview', detailData = null, compHealth = null;
 
 async function openDetail(id, tab, fromRoute){
   clearTimers();
   setNav('detail'); showOnly('view-detail');
   detailId = id; detailTab = TABS.includes(tab) ? tab : 'overview';
   if(!fromRoute) history.replaceState(null, '', '#review-' + id + (detailTab === 'overview' ? '' : '/' + detailTab));
+  restorePanelState();
   await renderDetail(false);
-  if(panelReview && panelReview !== id) openPanel(id); // panel follows navigation
+  if(panelReview !== id){ panelReview = id; chatMessages = []; loadBrief(id); loadChat(id); }
 }
 function clearTimers(){
   if(compTimer){ clearInterval(compTimer); compTimer = null; }
   if(detailTimer){ clearTimeout(detailTimer); detailTimer = null; }
-  if(analysisTimer){ clearTimeout(analysisTimer); analysisTimer = null; }
 }
 function timeline(status){
   const steps = [['queued','Queued'], ['running','Running'], [status, status]];
@@ -135,13 +152,39 @@ function timeline(status){
       (i < 2 ? '<span class="tlink"></span>' : '') + `</div>`;
   }).join('') + '</div>';
 }
+function stageCard(name, s){
+  const st = s?.status || 'pending';
+  const cls = st === 'success' ? '' : st === 'failed' ? 'st-failed' :
+              (st === 'running' || st === 'queued') ? 'st-running' : '';
+  return `<div class="stage ${cls}">
+    <div class="stage-head"><strong>${esc(name)}</strong>${badge(st)}</div>
+    <div class="dur">${s?.duration_seconds != null ? esc(s.duration_seconds) + 's' : (st === 'running' || st === 'queued' ? 'in progress…' : '—')}</div>
+    ${s?.error ? `<p class="err">${esc(s.error)}</p>` : ''}
+    ${s?.image ? `<div class="img">${esc(s.image)}</div>` : ''}
+  </div>`;
+}
+async function loadCompHealth(){
+  try{
+    const data = await api('/api/v1/components');
+    compHealth = data.components || [];
+  }catch(e){ compHealth = null; }
+}
+function healthBadges(){
+  if(!compHealth) return '';
+  return `<div class="health-row"><span class="muted" style="font-size:12px">Component health:</span>` +
+    compHealth.map(c => {
+      const ok = c.status === 'up';
+      return `<span class="health-badge ${ok ? 'ok' : 'bad'}" title="${esc(c.version || '')}${c.latency_ms != null ? ' · ' + c.latency_ms + 'ms' : ''}${c.error ? ' · ' + c.error : ''}">
+        <span class="dot dot-${c.status}"></span>${esc(c.name)}</span>`;
+    }).join('') + '</div>';
+}
 function findingsCountLabel(findings){
   return findings.length ? `Findings <span class="count">${findings.length}</span>` : 'Findings';
 }
 async function renderDetail(keepPosition){
   const el = $('detail-panel');
   try{
-    const r = await api(`/api/v1/reviews/${encodeURIComponent(detailId)}`);
+    const [r] = await Promise.all([api(`/api/v1/reviews/${encodeURIComponent(detailId)}`), loadCompHealth()]);
     detailData = r;
     const d = r.result || {};
     $('crumb-id').textContent = detailId.slice(0, 12);
@@ -149,20 +192,30 @@ async function renderDetail(keepPosition){
     $('detail-rid').textContent = r.review_id;
     const inv = d.inventory || [], covered = inv.filter(x => x.status === 'covered').length;
     const findings = d.findings || [];
+    const scanners = d.scanners || {};
+    const dojo = r.dojo || {};
 
     $('detail-tabs').innerHTML = TABS.map(t =>
       `<button class="tab${t === detailTab ? ' on' : ''}" role="tab" data-tab="${t}">` +
       (t === 'findings' ? findingsCountLabel(findings) : TAB_LABELS[t]) + `</button>`).join('');
 
+    const stageNames = ['sonarqube', 'checkov', 'trivy', 'gitleaks'];
     const panels = {
       overview: `
         ${timeline(r.status)}
         <div class="reason">${esc((d.reasons || ['Review is waiting for a terminal decision.']).join(' · '))}</div>
+        <h3 style="margin:20px 0 4px">Execution stages</h3>
+        <div class="stages">
+          ${stageNames.map(n => stageCard(n, scanners[n])).join('')}
+          ${stageCard('defectdojo', {status: dojo.status === 'synced' ? 'success' : (dojo.status || 'pending'),
+            duration_seconds: dojo.duration_seconds, error: dojo.error})}
+        </div>
+        ${healthBadges()}
         <div class="kv-grid">
           <div class="kv"><span>Commit</span><code>${esc(r.request.commit_sha)}</code></div>
           <div class="kv"><span>Policy</span>${esc(r.request.policy_version)} <span class="muted mono">${esc((r.request.policy_digest || '').slice(0, 16))}</span></div>
           <div class="kv"><span>Pipeline</span><a href="${esc(r.request.ado_run_url)}" target="_blank" rel="noopener noreferrer">Azure DevOps run ${esc(r.request.ado_run_id)}</a></div>
-          <div class="kv"><span>DefectDojo</span>${badge(r.dojo?.status || 'pending')}${r.dojo?.url ? ` <a href="${esc(r.dojo.url)}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}</div>
+          <div class="kv"><span>DefectDojo</span>${badge(dojo.status || 'pending')}${dojo.url ? ` <a href="${esc(dojo.url)}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}</div>
         </div>`,
       findings: `
         <div class="fbar" id="fbar">
@@ -176,15 +229,6 @@ async function renderDetail(keepPosition){
             <span class="sub">${esc(f.remediation || '')}</span></td>
             <td class="mono">${esc(f.file)}:${esc(f.line)}</td></tr>`).join('') + `</tbody></table>`
           : '<p class="muted" style="padding:16px">No findings recorded.</p>'}</div></div>`,
-      scanners: `
-        <div class="card" style="margin-top:0"><div class="table-wrap"><table class="tbl">
-        <thead><tr><th>Tool</th><th>Status</th><th>Duration</th><th>Outcome</th></tr></thead><tbody>
-        ${Object.entries(d.scanners || {}).map(([name, s]) => `<tr>
-          <td><strong>${esc(name)}</strong><span class="sub mono">${esc(s.image || '')}</span></td>
-          <td>${badge(s.status)}</td>
-          <td>${s.duration_seconds != null ? esc(s.duration_seconds) + 's' : '—'}</td>
-          <td class="muted">${esc(s.error || `Exit ${JSON.stringify(s.exit_code)}${s.quality_gate ? ' · Quality Gate ' + s.quality_gate : ''}`)}</td>
-        </tr>`).join('')}</tbody></table></div></div>`,
       coverage: `
         <p class="muted">Coverage · ${covered}/${inv.length} inputs</p>
         <div class="card" style="margin-top:12px"><div class="table-wrap"><table class="tbl">
@@ -192,17 +236,17 @@ async function renderDetail(keepPosition){
         ${inv.map(x => `<tr><td class="mono">${esc(x.path)}</td><td class="muted">${esc((x.required_tools || []).join(', '))}</td><td>${badge(x.status)}</td></tr>`).join('')}
         </tbody></table></div></div>`,
       evidence: `
-        <div class="chips">${Object.keys(d.artifacts || {}).map(n => `<button class="chip" data-artifact="${esc(n)}">↓ ${esc(n)}</button>`).join('')}
+        <div class="chips">${Object.keys(d.artifacts || {}).map(n => `<button class="chip" data-artifact="${esc(n)}">👁 ${esc(n)}</button>`).join('')}
         <button class="chip" id="audit-btn">View audit trail</button></div>
         <pre id="audit-data" hidden></pre>`,
     };
     el.innerHTML = `<div class="tabpanel">${panels[detailTab]}</div>`;
-    if(!keepPosition) window.scrollTo({top: 0, behavior: 'smooth'});
+    if(!keepPosition) window.scrollTo({top: 0});
     if(detailTab === 'findings') filterFindings('ALL');
     showError('');
-    // keep polling while the review is not terminal
+    // live polling while the review is not terminal (3s)
     if(['queued', 'running'].includes(r.status)){
-      detailTimer = setTimeout(() => { if(detailId) renderDetail(true); }, 10000);
+      detailTimer = setTimeout(() => { if(detailId) renderDetail(true); }, 3000);
     }
   }catch(e){ showError(e.message); }
 }
@@ -225,21 +269,29 @@ function filterFindings(sev){
   if(c) c.textContent = total ? `${vis} / ${total}` : '';
 }
 
-/* ---------- AI side panel ---------- */
-function openPanel(id){
-  panelReview = id;
-  if(analysisTimer){ clearTimeout(analysisTimer); analysisTimer = null; }
+/* ---------- AI side panel (persistent, collapsible) ---------- */
+function isMobile(){ return window.innerWidth < 1024; }
+function restorePanelState(){
   const p = $('ai-panel');
-  p.classList.add('open'); p.setAttribute('aria-hidden', 'false');
-  if(window.innerWidth <= 720) $('ai-scrim').hidden = false;
-  loadBrief(id); loadChat(id);
+  const collapsed = localStorage.getItem('tke-ai-collapsed') === '1';
+  p.classList.toggle('collapsed', collapsed && !isMobile());
+  $('ai-collapse').textContent = collapsed ? '›' : '‹';
+  $('ai-collapse').title = collapsed ? 'Expand' : 'Collapse';
+  if(isMobile()){ p.classList.remove('open'); $('ai-scrim').hidden = true; }
 }
-function closePanel(){
-  panelReview = null;
-  if(analysisTimer){ clearTimeout(analysisTimer); analysisTimer = null; }
-  $('ai-panel').classList.remove('open');
-  $('ai-panel').setAttribute('aria-hidden', 'true');
-  $('ai-scrim').hidden = true;
+function togglePanel(force){
+  const p = $('ai-panel');
+  if(isMobile()){
+    const open = force !== undefined ? force : !p.classList.contains('open');
+    p.classList.toggle('open', open);
+    $('ai-scrim').hidden = !open;
+    return;
+  }
+  const collapsed = force !== undefined ? !force : !p.classList.contains('collapsed');
+  p.classList.toggle('collapsed', collapsed);
+  localStorage.setItem('tke-ai-collapsed', collapsed ? '1' : '0');
+  $('ai-collapse').textContent = collapsed ? '›' : '‹';
+  $('ai-collapse').title = collapsed ? 'Expand' : 'Collapse';
 }
 async function loadBrief(id, attempt = 0){
   const box = $('ai-brief');
@@ -252,60 +304,93 @@ async function loadBrief(id, attempt = 0){
       <div class="md-body">${md(a.brief)}</div>
       <p class="ai-disclaimer">${esc(a.disclaimer)}</p>`;
   }catch(e){
-    if(attempt < 8 && panelReview === id){
+    if(attempt < 10 && panelReview === id){
       box.innerHTML = `<div class="spinner">Generating brief…</div>`;
-      analysisTimer = setTimeout(() => loadBrief(id, attempt + 1), 4000);
+      setTimeout(() => loadBrief(id, attempt + 1), 4000);
     }else if(panelReview === id){
       box.innerHTML = `<p class="muted">Brief unavailable for this review.</p>`;
     }
   }
 }
-function renderChat(messages){
+function renderChat(){
   const log = $('chat-log');
-  if(!messages.length){
-    log.innerHTML = `<div class="chat-empty">Ask about this review's findings — e.g. “Which finding should I fix first?”</div>`;
+  if(!chatMessages.length){
+    log.innerHTML = `<div class="chat-empty">Ask about anything on this page — the decision, scanners, coverage, findings, Dojo sync…</div>`;
     return;
   }
-  log.innerHTML = messages.map(m => m.role === 'user'
-    ? `<div class="msg user">${esc(m.content)}<time>${m.at ? esc(fmtDate(m.at)) : ''}</time></div>`
-    : `<div class="msg bot"><div class="md-body">${md(m.content)}</div><time>${m.at ? esc(fmtDate(m.at)) : ''}${m.model ? ' · ' + esc(m.model) : ''}</time></div>`
-  ).join('');
-  log.scrollTop = log.scrollHeight;
+  log.innerHTML = chatMessages.map(m => {
+    const t = m.at ? `<time>${esc(fmtDate(m.at))}${m.model ? ' · ' + esc(m.model) : ''}</time>` : '';
+    return m.role === 'user'
+      ? `<div class="msg user"><span>${esc(m.content)}</span>${t}</div>`
+      : `<div class="msg bot"><div class="md-body">${md(m.content)}</div>${t}</div>`;
+  }).join('');
+  requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
 }
 async function loadChat(id){
   try{
     const d = await api(`/api/v1/reviews/${encodeURIComponent(id)}/chat`);
-    if(panelReview === id) renderChat(d.messages || []);
+    if(panelReview !== id) return;
+    chatMessages = (d.messages || []).map(m => ({
+      role: m.role, content: m.content, at: m.at, model: m.model,
+    }));
+    renderChat();
   }catch(e){ /* leave placeholder */ }
 }
 async function sendChat(message){
-  const log = $('chat-log'), input = $('chat-input'), btn = $('chat-send');
-  const history = [];
-  log.querySelectorAll('.msg').forEach(el => {
-    const isUser = el.classList.contains('user');
-    const text = el.querySelector('.md-body')?.textContent || el.childNodes[0]?.textContent || '';
-    history.push({role: isUser ? 'user' : 'assistant', content: text.trim().slice(0, 2000)});
-  });
-  const empty = log.querySelector('.chat-empty'); if(empty) empty.remove();
-  const um = document.createElement('div'); um.className = 'msg user'; um.textContent = message;
+  const input = $('chat-input'), btn = $('chat-send');
+  const history = chatMessages.slice(-10).map(m => ({role: m.role, content: m.content}));
+  chatMessages.push({role: 'user', content: message, at: Date.now() / 1000});
+  renderChat();
   const typing = document.createElement('div');
   typing.className = 'msg bot typing'; typing.textContent = 'Analyst is thinking…';
-  log.append(um, typing); log.scrollTop = log.scrollHeight;
+  $('chat-log').append(typing);
+  $('chat-log').scrollTop = $('chat-log').scrollHeight;
   input.value = ''; input.disabled = true; btn.disabled = true;
   try{
     const r = await fetch(`/api/v1/reviews/${encodeURIComponent(panelReview)}/chat`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message, history}),
+      body: JSON.stringify({message, history, tab: detailTab}),
     });
     if(!r.ok) throw new Error(`Chat failed (${r.status})`);
-    await r.json();
-    await loadChat(panelReview);
+    const data = await r.json();
+    chatMessages.push({role: 'assistant', content: data.reply, at: Date.now() / 1000, model: data.model});
+    renderChat();
   }catch(e){
     typing.textContent = 'Chat unavailable: ' + e.message;
     typing.classList.remove('typing');
   }finally{
     input.disabled = false; btn.disabled = false; input.focus();
   }
+}
+
+/* ---------- artifact preview ---------- */
+let previewName = null, previewRaw = null;
+async function openPreview(name){
+  const modal = $('preview-modal');
+  previewName = name; previewRaw = null;
+  $('preview-title').textContent = name;
+  $('preview-body').innerHTML = `<div class="spinner" style="padding:24px">Loading…</div>`;
+  modal.hidden = false;
+  try{
+    const data = await api(`/api/v1/reviews/${encodeURIComponent(detailId)}/artifacts/${encodeURIComponent(name)}`);
+    const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+    previewRaw = text;
+    if(text.length > 600000){
+      $('preview-body').innerHTML = `<p class="muted" style="padding:20px">File too large for preview (${(text.length / 1024).toFixed(0)} KB). Use Download.</p>`;
+      return;
+    }
+    const highlighted = /\.json$/i.test(name) ? hlJson(text) : esc(text);
+    $('preview-body').innerHTML = `<div class="code-dark">${withLineNumbers(highlighted)}</div>`;
+  }catch(e){
+    $('preview-body').innerHTML = `<p class="muted" style="padding:20px">Preview failed: ${esc(e.message)}</p>`;
+  }
+}
+function closePreview(){ $('preview-modal').hidden = true; previewName = null; previewRaw = null; }
+function downloadPreview(){
+  if(!previewRaw || !previewName) return;
+  const url = URL.createObjectURL(new Blob([previewRaw], {type: 'application/octet-stream'}));
+  const a = document.createElement('a'); a.href = url; a.download = previewName; a.click();
+  URL.revokeObjectURL(url);
 }
 
 /* ---------- components ---------- */
@@ -319,7 +404,7 @@ const COMP_META = {
   defectdojo: {label: 'DefectDojo', desc: 'Findings evidence store'},
 };
 async function showComponents(fromRoute){
-  clearTimers(); closePanel();
+  clearTimers();
   setNav('components'); showOnly('view-components');
   if(!fromRoute && location.hash !== '#components') history.replaceState(null, '', '#components');
   await refreshComponents();
@@ -363,10 +448,20 @@ $('refresh').addEventListener('click', refreshList);
 $('nav-reviews').addEventListener('click', () => nav('#reviews'));
 $('nav-components').addEventListener('click', () => nav('#components'));
 $('comp-refresh').addEventListener('click', refreshComponents);
-$('ask-ai').addEventListener('click', () => { if(detailId) openPanel(detailId); });
-$('ai-close').addEventListener('click', closePanel);
-$('ai-scrim').addEventListener('click', closePanel);
-document.addEventListener('keydown', e => { if(e.key === 'Escape' && panelReview) closePanel(); });
+$('ai-collapse').addEventListener('click', () => togglePanel());
+$('ai-expand').addEventListener('click', () => togglePanel(true));
+$('ai-fab').addEventListener('click', () => togglePanel(true));
+$('ai-scrim').addEventListener('click', () => togglePanel(false));
+$('preview-close').addEventListener('click', closePreview);
+$('preview-download').addEventListener('click', downloadPreview);
+$('preview-modal').addEventListener('click', e => { if(e.target === $('preview-modal')) closePreview(); });
+document.addEventListener('keydown', e => {
+  if(e.key === 'Escape'){
+    if(!$('preview-modal').hidden) closePreview();
+    else if(isMobile()) togglePanel(false);
+  }
+});
+window.addEventListener('resize', () => { if(panelReview) restorePanelState(); });
 
 document.addEventListener('click', async e => {
   const tab = e.target.closest?.('.tab');
@@ -389,12 +484,7 @@ document.addEventListener('click', async e => {
     const row = e.target.closest?.('[data-review]');
     if(row){ nav('#review-' + row.dataset.review); return; }
     const chip = e.target.closest?.('[data-artifact]');
-    if(chip && detailId){
-      const data = await api(`/api/v1/reviews/${detailId}/artifacts/${encodeURIComponent(chip.dataset.artifact)}`);
-      const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'}));
-      const a = document.createElement('a'); a.href = url; a.download = chip.dataset.artifact; a.click();
-      URL.revokeObjectURL(url); return;
-    }
+    if(chip && detailId){ openPreview(chip.dataset.artifact); return; }
     if(e.target?.id === 'audit-btn' && detailId){
       const d = await api(`/api/v1/reviews/${detailId}/audit`);
       const pre = $('audit-data'); pre.hidden = false; pre.textContent = JSON.stringify(d, null, 2);
