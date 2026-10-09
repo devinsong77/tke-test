@@ -41,3 +41,13 @@ Returns status `queued`, `running`, `PASS`, `BLOCK`, or `ERROR`, immutable reque
 ## Client contract
 
 Use `scripts/gate_client.py`. PASS returns 0 and emits an ADO output variable. BLOCK returns 2. ERROR, malformed replies, unknown states, HTTP failures and timeout return 3. The client checks review and commit identity before accepting the decision. Retries are bounded and TLS verification is mandatory.
+
+## AI analyst brief (advisory only)
+
+`POST /api/v1/reviews/{review_id}/analysis` generates a plain-language analyst brief
+for a terminal review using an external LLM; `GET /api/v1/reviews/{review_id}/analysis`
+retrieves the cached brief. The brief is strictly advisory: it never influences the
+gate decision, which is computed deterministically from scanner evidence and policy.
+Requires the `ai_analyst` section in server `integrations.json` (base_url, api_key,
+model); without it the endpoints return 503/404. The dashboard shows the brief with
+an explicit "advisory only" label.

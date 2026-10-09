@@ -37,6 +37,15 @@ The initial pilot covers supported source, Dockerfile/IaC, lock/requirements fil
 
 No public fault-injection or policy-override endpoint exists. Fault injection requires host administrator access and a commit-bound marker under the root-owned configuration directory.
 
+## AI analyst (advisory layer)
+
+An optional LLM-backed brief (`app/analyst.py`) summarizes findings in plain language
+for human triage. It is strictly read-only with respect to the gate: the brief is
+generated on demand via `POST /api/v1/reviews/{id}/analysis`, stored separately from
+the decision, and labeled "advisory only" in the dashboard. The deterministic
+PASS/BLOCK/ERROR evaluation never calls the LLM. Requires an `ai_analyst` API key
+in server configuration; the gate works fully without it.
+
 ## Sonar policy
 
 The server provisions `TKE Security Policy` as the default Quality Gate for new review projects. Its exact metric thresholds (`vulnerabilities > 0`, `bugs > 0`) are included in policy-v1 and verified against the analysis response. A mismatch is ERROR. Sonar's analysis API supplies the analyzed file list, which is cross-checked against required source inputs. Shell scripts receive syntax checking and secret scanning; this pilot does not claim shell SAST coverage from Sonar.

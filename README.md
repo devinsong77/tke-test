@@ -2,7 +2,9 @@
 
 A server-side security review API that gates an Azure DevOps Pipeline. SonarQube, Checkov, Trivy and Gitleaks run on the assigned governance host. Reports are normalized into a fail-closed decision and imported into DefectDojo. The Hosted Agent only submits a signed request and waits for the result.
 
-**Delivery status:** implementation and deployment validation in progress. No real Azure DevOps PASS/BLOCK/ERROR runs have been claimed. See [evidence index](docs/evidence.md) for actual verification and outstanding prerequisites.
+**Delivery status:** complete and verified. Three real Azure DevOps acceptance runs
+(PASS/BLOCK/ERROR) against the production gate at `https://64.90.11.59:8443`.
+See [evidence index](docs/evidence.md) for run links, review IDs and commits.
 
 ## Main chain
 
