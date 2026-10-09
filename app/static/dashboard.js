@@ -135,7 +135,7 @@ async function openDetail(id, tab, fromRoute){
   if(!fromRoute) history.replaceState(null, '', '#review-' + id + (detailTab === 'overview' ? '' : '/' + detailTab));
   restorePanelState();
   await renderDetail(false);
-  if(panelReview !== id){ panelReview = id; chatMessages = []; loadBrief(id); loadChat(id); }
+  if(panelReview !== id){ panelReview = id; initAi(id); }
 }
 function clearTimers(){
   if(compTimer){ clearInterval(compTimer); compTimer = null; }
@@ -152,13 +152,15 @@ function timeline(status){
       (i < 2 ? '<span class="tlink"></span>' : '') + `</div>`;
   }).join('') + '</div>';
 }
-function stageCard(name, s){
+function stageCard(name, s, comp){
   const st = s?.status || 'pending';
   const cls = st === 'success' ? '' : st === 'failed' ? 'st-failed' :
               (st === 'running' || st === 'queued') ? 'st-running' : '';
+  const health = comp ? `<span class="stage-health" title="${esc(comp.version || '')}${comp.latency_ms != null ? ' · ' + comp.latency_ms + 'ms' : ''}${comp.error ? ' · ' + comp.error : ''}"><span class="dot dot-${comp.status}"></span>${esc(comp.status)}</span>` : '';
+  const stIcon = st === 'success' ? '✓' : st === 'failed' ? '✕' : (st === 'running' || st === 'queued') ? '●' : '○';
   return `<div class="stage ${cls}">
-    <div class="stage-head"><strong>${esc(name)}</strong>${badge(st)}</div>
-    <div class="dur">${s?.duration_seconds != null ? esc(s.duration_seconds) + 's' : (st === 'running' || st === 'queued' ? 'in progress…' : '—')}</div>
+    <div class="stage-head"><span class="stage-name"><span class="stage-icon st-ic-${st}">${stIcon}</span><strong>${esc(name)}</strong></span>${badge(st)}</div>
+    <div class="stage-sub"><span class="dur">${s?.duration_seconds != null ? esc(s.duration_seconds) + 's' : (st === 'running' || st === 'queued' ? 'in progress…' : '—')}</span>${health}</div>
     ${s?.error ? `<p class="err">${esc(s.error)}</p>` : ''}
     ${s?.image ? `<div class="img">${esc(s.image)}</div>` : ''}
   </div>`;
@@ -168,15 +170,6 @@ async function loadCompHealth(){
     const data = await api('/api/v1/components');
     compHealth = data.components || [];
   }catch(e){ compHealth = null; }
-}
-function healthBadges(){
-  if(!compHealth) return '';
-  return `<div class="health-row"><span class="muted" style="font-size:12px">Component health:</span>` +
-    compHealth.map(c => {
-      const ok = c.status === 'up';
-      return `<span class="health-badge ${ok ? 'ok' : 'bad'}" title="${esc(c.version || '')}${c.latency_ms != null ? ' · ' + c.latency_ms + 'ms' : ''}${c.error ? ' · ' + c.error : ''}">
-        <span class="dot dot-${c.status}"></span>${esc(c.name)}</span>`;
-    }).join('') + '</div>';
 }
 function findingsCountLabel(findings){
   return findings.length ? `Findings <span class="count">${findings.length}</span>` : 'Findings';
@@ -200,17 +193,18 @@ async function renderDetail(keepPosition){
       (t === 'findings' ? findingsCountLabel(findings) : TAB_LABELS[t]) + `</button>`).join('');
 
     const stageNames = ['sonarqube', 'checkov', 'trivy', 'gitleaks'];
+    const compMap = {};
+    (compHealth || []).forEach(c => { compMap[c.name] = c; });
     const panels = {
       overview: `
         ${timeline(r.status)}
         <div class="reason">${esc((d.reasons || ['Review is waiting for a terminal decision.']).join(' · '))}</div>
-        <h3 style="margin:20px 0 4px">Execution stages</h3>
+        <h3 class="section-h">Execution stages <span class="muted" style="font-weight:400">· live component health</span></h3>
         <div class="stages">
-          ${stageNames.map(n => stageCard(n, scanners[n])).join('')}
+          ${stageNames.map(n => stageCard(n, scanners[n], compMap[n])).join('')}
           ${stageCard('defectdojo', {status: dojo.status === 'synced' ? 'success' : (dojo.status || 'pending'),
-            duration_seconds: dojo.duration_seconds, error: dojo.error})}
+            duration_seconds: dojo.duration_seconds, error: dojo.error}, compMap['defectdojo'])}
         </div>
-        ${healthBadges()}
         <div class="kv-grid">
           <div class="kv"><span>Commit</span><code>${esc(r.request.commit_sha)}</code></div>
           <div class="kv"><span>Policy</span>${esc(r.request.policy_version)} <span class="muted mono">${esc((r.request.policy_digest || '').slice(0, 16))}</span></div>
@@ -293,29 +287,36 @@ function togglePanel(force){
   $('ai-collapse').textContent = collapsed ? '›' : '‹';
   $('ai-collapse').title = collapsed ? 'Expand' : 'Collapse';
 }
-async function loadBrief(id, attempt = 0){
-  const box = $('ai-brief');
-  if(!box || panelReview !== id) return;
-  try{
-    const a = await api(`/api/v1/reviews/${encodeURIComponent(id)}/analysis`);
-    if(panelReview !== id) return;
-    box.innerHTML = `
-      <p class="ai-meta">${esc(a.model)} · ${esc(fmtDate(a.generated_at))} · ${esc(a.duration_seconds)}s</p>
-      <div class="md-body">${md(a.brief)}</div>
-      <p class="ai-disclaimer">${esc(a.disclaimer)}</p>`;
-  }catch(e){
-    if(attempt < 10 && panelReview === id){
-      box.innerHTML = `<div class="spinner">Generating brief…</div>`;
-      setTimeout(() => loadBrief(id, attempt + 1), 4000);
-    }else if(panelReview === id){
-      box.innerHTML = `<p class="muted">Brief unavailable for this review.</p>`;
-    }
+let aiLoading = false;
+async function fetchBrief(id, attempts = 12){
+  for(let i = 0; i < attempts; i++){
+    if(panelReview !== id) return null;
+    try{
+      return await api(`/api/v1/reviews/${encodeURIComponent(id)}/analysis`);
+    }catch(e){ /* not ready yet — backend auto-generates on terminal */ }
+    await new Promise(r => setTimeout(r, 4000));
   }
+  return null;
+}
+async function initAi(id){
+  chatMessages = []; aiLoading = true; renderChat();
+  const [brief, chat] = await Promise.all([
+    fetchBrief(id),
+    api(`/api/v1/reviews/${encodeURIComponent(id)}/chat`).catch(() => ({messages: []})),
+  ]);
+  if(panelReview !== id) return;
+  aiLoading = false;
+  const history = (chat.messages || []).map(m => ({role: m.role, content: m.content, at: m.at, model: m.model}));
+  chatMessages = history;
+  if(!history.length && brief && brief.brief){
+    chatMessages.push({role: 'assistant', content: brief.brief, at: brief.generated_at, model: brief.model, kind: 'brief'});
+  }
+  renderChat();
 }
 function renderChat(){
   const log = $('chat-log');
-  if(!chatMessages.length){
-    log.innerHTML = `<div class="chat-empty">Ask about anything on this page — the decision, scanners, coverage, findings, Dojo sync…</div>`;
+  if(!chatMessages.length && !aiLoading){
+    log.innerHTML = `<div class="chat-empty"><div class="chat-empty-icon">✦</div><p>Ask about anything on this page — the decision, scanners, coverage, findings, Dojo sync…</p></div>`;
     return;
   }
   log.innerHTML = chatMessages.map(m => {
@@ -323,19 +324,10 @@ function renderChat(){
     return m.role === 'user'
       ? `<div class="msg user"><span>${esc(m.content)}</span>${t}</div>`
       : `<div class="msg bot"><div class="md-body">${md(m.content)}</div>${t}</div>`;
-  }).join('');
+  }).join('') + (aiLoading ? `<div class="msg bot typing"><span class="typing-dots"><i></i><i></i><i></i></span> Generating brief…</div>` : '');
   requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
 }
-async function loadChat(id){
-  try{
-    const d = await api(`/api/v1/reviews/${encodeURIComponent(id)}/chat`);
-    if(panelReview !== id) return;
-    chatMessages = (d.messages || []).map(m => ({
-      role: m.role, content: m.content, at: m.at, model: m.model,
-    }));
-    renderChat();
-  }catch(e){ /* leave placeholder */ }
-}
+
 async function sendChat(message){
   const input = $('chat-input'), btn = $('chat-send');
   const history = chatMessages.slice(-10).map(m => ({role: m.role, content: m.content}));
