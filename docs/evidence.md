@@ -2,17 +2,41 @@
 
 ## Status
 
-Implementation is under validation. The user has not yet registered Azure DevOps. Local/unit or host smoke tests are not represented as real ADO acceptance runs.
+All three acceptance paths verified with real Azure DevOps runs against the production gate deployment (revision b72e2fc, https://64.90.11.59:8443).
 
-| Required path | ADO Run | Commit | Review ID | Evidence | Status |
-|---|---|---|---|---|---|
-| PASS → Publish executes | Pending | Pending | Pending | Pending | Awaiting ADO setup |
-| BLOCK → Publish skipped | Pending | Pending | Pending | Pending | Awaiting ADO setup |
-| ERROR → Publish skipped | Pending | Pending | Pending | Pending | Awaiting ADO setup |
+| Required path | ADO Run | Commit | Review ID | Status |
+|---|---|---|---|---|
+| PASS → Publish executes | [#20261009.1](https://dev.azure.com/devinsong77-tke/tke-test/_build/results?buildId=1) (main) | `dab03b0` | `83f5f82cee4944c7803469af629ad4f2` | ✅ Verified 2026-10-09: gate PASS, Publish stage ran |
+| BLOCK → Publish skipped | [#20261009.2](https://dev.azure.com/devinsong77-tke/tke-test/_build/results?buildId=2) (acceptance/block-synthetic-secret) | `af4693d` | `4bf3baf82df04df584682edda6821677` | ✅ Verified 2026-10-09: gate BLOCK (3 gitleaks findings on synthetic secret), Publish skipped |
+| ERROR → Publish skipped | [#20261009.3](https://dev.azure.com/devinsong77-tke/tke-test/_build/results?buildId=3) (acceptance/error-fault-injection) | `4cb7c2b` | `3b41795c36894f6597a4049cac9e6e0d` | ✅ Verified 2026-10-09: gate ERROR (controlled Trivy startup failure), Publish skipped |
+
+## Acceptance run details
+
+### PASS — run #20261009.1 (buildId=1)
+- Branch: main, commit `dab03b01d4...` ("Link govgate variable group to pipeline")
+- Gate: POST /api/v1/reviews → 202, review_id `83f5f82cee4944c7803469af629ad4f2`; polled to `PASS` ("All required scans completed; no blocking policy violations")
+- All four scanners success; DefectDojo synced
+- Publish stage: executed (approved-release artifact published)
+
+### BLOCK — run #20261009.2 (buildId=2)
+- Branch: acceptance/block-synthetic-secret, commit `af4693df...` (adds SYNTHETIC-SECRET.txt, clearly-marked synthetic credentials, never merged to main)
+- Gate: review_id `4bf3baf82df04df584682edda6821677` → `BLOCK`, reasons: ["3 finding(s) violate policy"]
+- Blocking findings: gitleaks `generic-api-key` (×2) and `github-pat` (×1) in SYNTHETIC-SECRET.txt
+- Gate client exited 2; Publish stage: skipped due to conditions; overall run Failed (expected)
+
+### ERROR — run #20261009.3 (buildId=3)
+- Branch: acceptance/error-fault-injection, commit `4cb7c2be...`
+- Fault injection: host-admin file `/opt/tke-governance/config/faults/4cb7c2be...` forces the Trivy scanner container to fail at startup (nonexistent entrypoint); the worker records the real nonzero exit and evaluates fail-closed
+- Gate: review_id `3b41795c36894f6597a4049cac9e6e0d` → `ERROR`, reasons: ["trivy: Controlled scanner startup failure (missing entrypoint)", "Uncovered input: requirements.txt"]
+- Gate client exited 3; Publish stage: skipped due to conditions; overall run Failed (expected)
+- DefectDojo: synced (successful scanner imports)
 
 ## Verified so far
 
 - SSH login to the assigned host works.
+- Azure DevOps org `devinsong77-tke`, project `tke-test`, pipeline `devinsong77.tke-test` bound to GitHub `devinsong77/tke-test`; variable group `govgate` (GATE_URL/GATE_TOKEN/GATE_HMAC_KEY) linked and permitted.
+- Microsoft-hosted agent quota: free tier 1 parallel job, 0/1800 min consumed at setup.
+- Server deployment: single hardened stack (tke-tools-*); nginx :8443 → governance API :8000; SonarQube :9000, DefectDojo :8080; repo CA cert matches server TLS cert (modulus-verified).
 - Ubuntu 24.04, 16 CPU cores, approximately 16 GiB RAM, approximately 93 GiB initially free.
 - First 10 local tests passed: authentication, read-only role, signed submission, idempotency conflict, nonce replay, signature tampering, expired request, repository/ADO binding, cross-repository access, fail-closed evaluation and artifact integrity.
 
