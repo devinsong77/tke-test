@@ -99,16 +99,40 @@ def _check_http_component(name, url, parse):
 
 
 def _check_tool_component(name, image):
-    """Check a scanner's Docker image is present locally so the worker can run it. 5s timeout."""
+    """Scanner health: Docker image present (if queryable), else last scan outcome from DB.
+
+    Read-only. The API user may lack docker-socket access; in that case the most
+    recent terminal review's scanner status is the truthful signal.
+    """
     start = time.time()
     try:
         proc = subprocess.run(['docker', 'image', 'inspect', image],
                               capture_output=True, text=True, timeout=5)
-        latency_ms = int((time.time() - start) * 1000)
         if proc.returncode == 0:
-            return _component(name, 'up', version=image, latency_ms=latency_ms)
-        return _component(name, 'down', version=image, latency_ms=latency_ms,
-                          error=f'image not present locally: {image}')
+            return _component(name, 'up', version=image,
+                              latency_ms=int((time.time() - start) * 1000))
+    except Exception:
+        pass
+    # Fallback: last terminal review's scanner status from the DB.
+    try:
+        with core.db() as con:
+            row = con.execute(
+                "SELECT result, updated FROM reviews WHERE status IN ('PASS','BLOCK','ERROR')"
+                " AND result IS NOT NULL ORDER BY updated DESC LIMIT 1").fetchone()
+        if row:
+            scanners = (json.loads(row['result']) or {}).get('scanners', {})
+            s = scanners.get(name, {})
+            st = s.get('status')
+            latency_ms = int((time.time() - start) * 1000)
+            if st == 'success':
+                return _component(name, 'up', version=image, latency_ms=latency_ms,
+                                  error=None)
+            if st:
+                return _component(name, 'degraded', version=image, latency_ms=latency_ms,
+                                  error=f'last scan {st}: {(s.get("error") or "")[:120]}')
+        return _component(name, 'degraded', version=image,
+                          latency_ms=int((time.time() - start) * 1000),
+                          error='no scan history yet')
     except Exception as e:
         return _component(name, 'down', version=image,
                           latency_ms=int((time.time() - start) * 1000), error=str(e)[:200])
