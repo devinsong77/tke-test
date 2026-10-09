@@ -88,6 +88,73 @@ function timeline(status){
   }).join('') + '</div>';
 }
 
+/* ---------- components view ---------- */
+let currentView = 'reviews', compTimer = null;
+
+const COMP_META = {
+  api:        {label: 'Gate API',   desc: 'Review API serving this dashboard'},
+  worker:     {label: 'Worker',     desc: 'Background scanner orchestrator'},
+  sonarqube:  {label: 'SonarQube',  desc: 'SAST · quality gate'},
+  checkov:    {label: 'Checkov',    desc: 'IaC misconfiguration scan'},
+  trivy:      {label: 'Trivy',      desc: 'Vulnerability scan'},
+  gitleaks:   {label: 'Gitleaks',   desc: 'Secret scan'},
+  defectdojo: {label: 'DefectDojo', desc: 'Findings evidence store'},
+};
+
+function compStatusClass(s){ return s === 'up' ? 'st-success' : s === 'degraded' ? 'st-degraded' : 'st-failed'; }
+
+async function refreshComponents(){
+  const grid = $('comp-grid'), banner = $('comp-banner');
+  try{
+    const data = await api('/api/v1/components');
+    showError('');
+    const comps = data.components || [];
+    const down = comps.filter(c => c.status === 'down');
+    const degraded = comps.filter(c => c.status === 'degraded');
+    if(down.length || degraded.length){
+      const names = [...down, ...degraded].map(c => (COMP_META[c.name] || {}).label || c.name);
+      banner.hidden = false;
+      banner.textContent = `⚠ ${names.join(', ')} ${down.length ? 'down' : 'degraded'} — scanner coverage may be affected.`;
+    } else {
+      banner.hidden = true;
+    }
+    grid.innerHTML = comps.map(c => {
+      const meta = COMP_META[c.name] || {label: c.name, desc: ''};
+      return `<div class="comp-card">
+        <div class="comp-head">
+          <span class="dot dot-${c.status}"></span>
+          <div><strong>${esc(meta.label)}</strong><small class="muted">${esc(meta.desc)}</small></div>
+          ${badge(c.status)}
+        </div>
+        <dl class="comp-meta">
+          <div><dt>Version</dt><dd>${c.version ? `<code>${esc(c.version)}</code>` : '—'}</dd></div>
+          <div><dt>Latency</dt><dd>${c.latency_ms != null ? esc(c.latency_ms) + ' ms' : '—'}</dd></div>
+          <div><dt>Checked</dt><dd>${esc(fmtDate(c.checked_at))}</dd></div>
+        </dl>
+        ${c.error ? `<p class="comp-error">${esc(c.error)}</p>` : ''}
+      </div>`;
+    }).join('');
+    $('comp-empty').hidden = true;
+    $('comp-updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  }catch(e){
+    $('comp-empty').hidden = false;
+    banner.hidden = false;
+    banner.textContent = '⚠ Could not reach the health endpoint: ' + e.message;
+  }
+}
+
+function showView(view){
+  currentView = view;
+  $('nav-reviews').classList.toggle('active', view === 'reviews');
+  $('nav-components').classList.toggle('active', view === 'components');
+  $('workspace').hidden = view !== 'reviews';
+  $('components-view').hidden = view !== 'components';
+  if(view === 'components'){
+    refreshComponents();
+    if(!compTimer) compTimer = setInterval(() => { if(currentView === 'components') refreshComponents(); }, 30000);
+  }
+}
+
 /* ---------- detail view ---------- */
 async function details(id, keepScroll, initialTab){
   if(analysisTimer){ clearInterval(analysisTimer); analysisTimer = null; }
@@ -289,7 +356,9 @@ function filterFindings(sev){
 
 /* ---------- events ---------- */
 $('refresh').addEventListener('click', refresh);
-$('nav-reviews').addEventListener('click', () => { selected = null; $('detail').hidden = true; refresh(); });
+$('nav-reviews').addEventListener('click', () => { selected = null; $('detail').hidden = true; showView('reviews'); refresh(); });
+$('nav-components').addEventListener('click', () => showView('components'));
+$('comp-refresh').addEventListener('click', refreshComponents);
 document.addEventListener('click', async e => {
   const tab = e.target.closest?.('.tab');
   if(tab && selected){ switchTab(tab.dataset.tab); return; }

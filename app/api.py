@@ -3,8 +3,11 @@ import hashlib
 import hmac
 import json
 import re
+import shutil
 import sqlite3
+import subprocess
 import time
+import urllib.request
 import uuid
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -73,6 +76,91 @@ def health():
     with core.db() as con:
         con.execute('SELECT 1').fetchone()
     return {'status': 'ok', 'service': 'governance-api'}
+
+
+def _component(name, status, version=None, latency_ms=None, error=None):
+    return {'name': name, 'status': status, 'version': version,
+            'latency_ms': latency_ms, 'checked_at': time.time(), 'error': error}
+
+
+def _check_http_component(name, url, parse):
+    """GET url with a 5s timeout; parse(response) -> (ok, version, detail)."""
+    start = time.time()
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'govgate-health/1.0'})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            latency_ms = int((time.time() - start) * 1000)
+            ok, version, detail = parse(r)
+            status = 'up' if ok else 'degraded'
+            return _component(name, status, version=version, latency_ms=latency_ms,
+                              error=None if ok else detail)
+    except Exception as e:
+        latency_ms = int((time.time() - start) * 1000)
+        return _component(name, 'down', latency_ms=latency_ms, error=str(e)[:200])
+
+
+def _check_tool_component(name, binary, version_args):
+    """Check a scanner CLI is installed and reports a version. 5s timeout."""
+    start = time.time()
+    path = shutil.which(binary)
+    if not path:
+        return _component(name, 'down', latency_ms=int((time.time() - start) * 1000),
+                          error=f'{binary} not found on PATH')
+    try:
+        proc = subprocess.run([path, *version_args], capture_output=True, text=True, timeout=5)
+        out = (proc.stdout or proc.stderr or '').strip().splitlines()
+        version = out[0][:80] if out else None
+        latency_ms = int((time.time() - start) * 1000)
+        if proc.returncode == 0 and version:
+            return _component(name, 'up', version=version, latency_ms=latency_ms)
+        return _component(name, 'degraded', version=version, latency_ms=latency_ms,
+                          error=f'{binary} exited {proc.returncode}')
+    except Exception as e:
+        return _component(name, 'down', latency_ms=int((time.time() - start) * 1000),
+                          error=str(e)[:200])
+
+
+def _check_worker_component():
+    """Worker is healthy when its process is alive. Read-only: pgrep only."""
+    start = time.time()
+    try:
+        proc = subprocess.run(['pgrep', '-f', 'app.worker'], capture_output=True, text=True, timeout=5)
+        latency_ms = int((time.time() - start) * 1000)
+        if proc.returncode == 0 and proc.stdout.strip():
+            return _component('worker', 'up', latency_ms=latency_ms)
+        return _component('worker', 'down', latency_ms=latency_ms, error='no app.worker process found')
+    except Exception as e:
+        return _component('worker', 'down', latency_ms=int((time.time() - start) * 1000),
+                          error=str(e)[:200])
+
+
+def _sonar_parse(r):
+    try:
+        d = json.load(r)
+    except Exception:
+        return False, None, 'invalid JSON from SonarQube'
+    ok = d.get('status') == 'UP'
+    return ok, d.get('version'), None if ok else f"system status: {d.get('status')}"
+
+
+def _dojo_parse(r):
+    # DefectDojo redirects / to the login page; 200 or 30x both mean the app is up.
+    return True, None, None
+
+
+@app.get('/api/v1/components')
+def component_health(auth=Depends(optional_identity)):
+    """Read-only health of every governance component. Public, like other dashboard GETs."""
+    components = [
+        _component('api', 'up', version='1.0.0', latency_ms=0),
+        _check_worker_component(),
+        _check_http_component('sonarqube', 'http://127.0.0.1:9000/api/system/status', _sonar_parse),
+        _check_http_component('defectdojo', 'http://127.0.0.1:8080/', _dojo_parse),
+        _check_tool_component('checkov', 'checkov', ['--version']),
+        _check_tool_component('trivy', 'trivy', ['--version']),
+        _check_tool_component('gitleaks', 'gitleaks', ['version']),
+    ]
+    return {'components': components, 'checked_at': time.time()}
 
 
 @app.post('/api/v1/reviews', status_code=202)
