@@ -36,7 +36,7 @@ All three acceptance paths verified with real Azure DevOps runs against the prod
 - SSH login to the assigned host works.
 - Azure DevOps org `devinsong77-tke`, project `tke-test`, pipeline `devinsong77.tke-test` bound to GitHub `devinsong77/tke-test`; variable group `govgate` (GATE_URL/GATE_TOKEN/GATE_HMAC_KEY) linked and permitted.
 - Microsoft-hosted agent quota: free tier 1 parallel job, 0/1800 min consumed at setup.
-- Server deployment: single hardened stack (tke-tools-*); nginx :8443 → governance API :8000; SonarQube :9000, DefectDojo :8080; repo CA cert matches server TLS cert (modulus-verified).
+- Server deployment: single hardened stack Least-privilege: SonarQube uses dedicated `gate-scanner` account (Execute Analysis only, cannot delete projects or administer); DefectDojo uses non-staff `governance-importer` (engagement/scan import only, cannot manage users). (tke-tools-*); nginx :8443 → governance API :8000; SonarQube :9000, DefectDojo :8080; repo CA cert matches server TLS cert (modulus-verified).
 - Ubuntu 24.04, 16 CPU cores, approximately 16 GiB RAM, approximately 93 GiB initially free.
 - First 10 local tests passed: authentication, read-only role, signed submission, idempotency conflict, nonce replay, signature tampering, expired request, repository/ADO binding, cross-repository access, fail-closed evaluation and artifact integrity.
 
