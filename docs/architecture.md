@@ -41,7 +41,7 @@ No public fault-injection or policy-override endpoint exists. Fault injection re
 
 An optional LLM-backed brief (`app/analyst.py`) summarizes findings in plain language
 for human triage. It is strictly read-only with respect to the gate: the brief is
-generated on demand via `POST /api/v1/reviews/{id}/analysis`, stored separately from
+generated automatically on terminal reviews (best effort), with authenticated manual regeneration via `POST /api/v1/reviews/{id}/analysis`, stored separately from
 the decision, and labeled "advisory only" in the dashboard. The deterministic
 PASS/BLOCK/ERROR evaluation never calls the LLM. Requires an `ai_analyst` API key
 in server configuration; the gate works fully without it.

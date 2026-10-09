@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -81,11 +82,27 @@ def atomic_json(path, data):
     temp.replace(path)
 
 
+def is_pipeline_review(row):
+    run_id = str(json.loads(row['request']).get('ado_run_id', ''))
+    return run_id.isascii() and run_id.isdigit() and int(run_id) > 0
+
+
+def github_repository_url(repository):
+    # Export only a public GitHub path, never clone credentials or local paths.
+    try:
+        url = config('repositories.json').get(repository, {}).get('url', '')
+    except (OSError, ValueError):
+        return None
+    match = re.fullmatch(r'(?:https://github\.com/|git@github\.com:)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?', url)
+    return 'https://github.com/' + match[1] if match else None
+
+
 def public_review(row):
     request = json.loads(row['request'])
     return {'review_id': row['id'], 'status': row['status'],
             'created_at': row['created'], 'updated_at': row['updated'],
             'request': request, 'request_digest': row['request_digest'],
+            'repository_url': github_repository_url(request['repository']),
             'result': json.loads(row['result']) if row['result'] else None,
             'dojo': json.loads(row['dojo'])}
 

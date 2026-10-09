@@ -11,8 +11,32 @@ const badge = v => `<span class="badge st-${/^[A-Za-z_]+$/.test(v) ? v : 'x'}">$
 const fmtDate = ts => ts ? new Date(ts * 1000).toLocaleString() : '—';
 const fmtDuration = n => n == null ? '—' : n < 60 ? `${Number(n).toFixed(1)}s` : `${Math.floor(Math.round(n) / 60)}m ${Math.round(n) % 60}s`;
 const isPipeline = r => /^\d+$/.test(r.request.ado_run_id) && Number(r.request.ado_run_id) > 0;
-const sourceLabel = r => isPipeline(r) ? `Run #${r.request.ado_run_id}` : 'Host test';
+const sourceLabel = r => `Run #${r.request.ado_run_id}`;
 const shortId = id => esc((id || '').slice(0, 12));
+
+// Links always use an immutable scanned revision, never the default branch.
+function githubUrl(r, file = '', line = 0, revision = ''){
+  const repo = r.repository_url;
+  const sha = revision || r.request.commit_sha;
+  if(!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo || '') || !/^[a-f0-9]{40}$/i.test(sha || '')) return null;
+  if(!file) return `${repo}/commit/${sha}`;
+  const path = String(file).replace(/^\/src\//, '').replace(/^\.\//, '');
+  if(path.startsWith('/') || path.includes('\\') || path.split('/').some(p => !p || p === '..' || p === '.')) return null;
+  const number = Number(line);
+  return `${repo}/blob/${sha}/${path.split('/').map(encodeURIComponent).join('/')}${Number.isSafeInteger(number) && number > 0 ? '#L' + number : ''}`;
+}
+function commitLink(r, short = false){
+  const label = esc(short ? r.request.commit_sha.slice(0, 10) : r.request.commit_sha);
+  const url = githubUrl(r);
+  return url ? `<a class="mono" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="View scanned commit on GitHub">${label} ↗</a>` : `<span class="mono">${label}</span>`;
+}
+function findingLocation(r, finding){
+  if(!finding.file) return '<span class="muted">No source location</span>';
+  const line = Number(finding.line);
+  const label = esc(finding.file) + (Number.isSafeInteger(line) && line > 0 ? ':' + line : '');
+  const url = githubUrl(r, finding.file, finding.line, finding.commit_sha);
+  return url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="View finding in GitHub at its recorded revision">${label} ↗</a>` : label;
+}
 
 /* ---------- markdown renderer (no external deps; CSP is script-src 'self') ---------- */
 function mdInline(s){
@@ -76,7 +100,7 @@ async function api(path, opts = {}){
 function showError(msg){ const m = $('message'); m.hidden = !msg; m.textContent = msg || ''; }
 
 /* ---------- router ---------- */
-const TABS = ['overview', 'findings', 'coverage', 'evidence'];
+const TABS = ['overview', 'coverage', 'findings', 'evidence'];
 const TAB_LABELS = {overview: 'Overview', findings: 'Findings', coverage: 'Coverage', evidence: 'Evidence'};
 
 function nav(hash){ if(location.hash === hash) route(); else location.hash = hash; }
@@ -121,10 +145,10 @@ async function refreshList(){
   try{
     const data = await api('/api/v1/reviews');
     if(!$('view-reviews').hidden) showError('');
-    reviewsCache = data.reviews || [];
+    reviewsCache = (data.reviews || []).filter(isPipeline);
     const n = status => reviewsCache.filter(x => x.status === status).length;
     $('metrics').innerHTML = [
-      ['Reviews', reviewsCache.length, '', 'Latest 100, across all sources'], ['Passed', n('PASS'), 's-pass', 'All required checks satisfied'],
+      ['Reviews', reviewsCache.length, '', 'Latest 100 Azure Pipeline reviews'], ['Passed', n('PASS'), 's-pass', 'All required checks satisfied'],
       ['Blocked', n('BLOCK'), 's-block', 'Policy violations detected'], ['Errors', n('ERROR'), 's-error', 'Incomplete or failed checks'],
     ].map(([label, count, cls, note]) => `<div class="stat ${cls}"><span>${label}</span><strong>${count}</strong><small>${note}</small></div>`).join('');
     renderLatest(); renderReviewRows();
@@ -139,19 +163,18 @@ function renderLatest(){
   el.hidden = !r;
   if(!r) return;
   const d = r.result || {};
-  el.innerHTML = `<div class="latest-main"><span class="eyebrow">Latest pipeline review</span><div class="latest-title">${badge(r.status)}<strong>${esc(r.request.repository)}</strong><span class="muted">${esc(sourceLabel(r))}</span></div><p>${esc((d.reasons || ['Awaiting a terminal decision.']).join(' · '))}</p></div><div class="latest-side"><span class="mono">${esc(r.request.commit_sha.slice(0, 10))}</span><a class="btn" href="#review-${esc(r.review_id)}">View review <span aria-hidden="true">↗</span></a></div>`;
+  el.innerHTML = `<div class="latest-main"><span class="eyebrow">Latest pipeline review</span><div class="latest-title">${badge(r.status)}<strong>${esc(r.request.repository)}</strong><span class="muted">${esc(sourceLabel(r))}</span></div><p>${esc((d.reasons || ['Awaiting a terminal decision.']).join(' · '))}</p></div><div class="latest-side"><span class="mono">${commitLink(r, true)}</span><a class="btn" href="#review-${esc(r.review_id)}">View review <span aria-hidden="true">↗</span></a></div>`;
 }
 function renderReviewRows(){
   const query = $('review-search').value.trim().toLowerCase();
-  const decision = $('decision-filter').value, source = $('source-filter').value;
+  const decision = $('decision-filter').value;
   const rs = reviewsCache.filter(r => (decision === 'all' || r.status === decision) &&
-    (source === 'all' || isPipeline(r) === (source === 'pipeline')) &&
     [r.review_id, r.request.repository, r.request.commit_sha, r.request.ado_run_id, sourceLabel(r)].some(v => String(v).toLowerCase().includes(query)));
   const pages = Math.max(1, Math.ceil(rs.length / PAGE_SIZE));
   listPage = Math.min(listPage, pages - 1);
   $('reviews').innerHTML = rs.slice(listPage * PAGE_SIZE, (listPage + 1) * PAGE_SIZE).map(r => `<tr class="clickable" data-review="${esc(r.review_id)}">
     <td>${badge(r.status)}</td><td><a class="review-link" href="#review-${esc(r.review_id)}">${esc(sourceLabel(r))} <span aria-hidden="true">↗</span></a><span class="sub mono">${shortId(r.review_id)}</span></td>
-    <td><strong class="repo-name">${esc(r.request.repository)}</strong><span class="sub mono">${esc(r.request.commit_sha.slice(0, 10))}</span></td>
+    <td><strong class="repo-name">${esc(r.request.repository)}</strong><span class="sub mono">${commitLink(r, true)}</span></td>
     <td class="duration">${fmtDuration(r.result?.duration_seconds)}</td><td>${badge(r.dojo?.status || 'pending')}</td>
     <td class="muted date-cell">${esc(fmtDate(r.created_at))}</td></tr>`).join('');
   $('empty').hidden = !!rs.length;
@@ -196,6 +219,8 @@ function stageCard(name, s, comp){
     <div class="stage-head"><span class="stage-name"><span class="stage-icon st-ic-${st}">${stIcon}</span><strong>${esc(COMP_META[name]?.label || name)}</strong></span>${badge(st)}</div>
     <div class="stage-sub"><span class="dur">${s?.duration_seconds != null ? fmtDuration(s.duration_seconds) : (st === 'running' || st === 'queued' ? 'In progress…' : 'Recorded result')}</span>${health}</div>
     ${s?.error ? `<p class="err">${esc(s.error)}</p>` : ''}
+    ${s?.version ? `<div class="img">Version: ${esc(s.version)}</div>` : ''}
+    ${s?.exit_code != null ? `<div class="img">Exit code: ${esc(s.exit_code)}</div>` : ''}
     ${s?.image ? `<div class="img">${esc(s.image)}</div>` : ''}
   </div>`;
 }
@@ -219,6 +244,8 @@ async function renderDetail(keepPosition){
     $('detail-title').innerHTML = `${badge(r.status)}<span>${esc(r.request.repository)}</span>`;
     $('detail-rid').textContent = r.review_id;
     const inv = d.inventory || [], covered = inv.filter(x => x.status === 'covered').length;
+    const applicable = inv.filter(x => x.status !== 'N/A').length;
+    const coverageLabel = applicable ? `${Math.round(100 * covered / applicable)}% (${covered}/${applicable} applicable)` : (inv.length ? 'N/A — no applicable inputs' : 'No coverage evidence');
     const findings = d.findings || [];
     const scanners = d.scanners || {};
     const dojo = r.dojo || {};
@@ -241,9 +268,9 @@ async function renderDetail(keepPosition){
             duration_seconds: dojo.duration_seconds, error: dojo.error}, compMap['defectdojo'])}
         </div>
         <div class="kv-grid">
-          <div class="kv"><span>Commit</span><code>${esc(r.request.commit_sha)}</code></div>
+          <div class="kv"><span>Commit</span>${commitLink(r)}</div>
           <div class="kv"><span>Policy</span>${esc(r.request.policy_version)} <span class="muted mono">${esc((r.request.policy_digest || '').slice(0, 16))}</span></div>
-          <div class="kv"><span>Source</span>${isPipeline(r) ? `<a href="${esc(r.request.ado_run_url)}" target="_blank" rel="noopener noreferrer">Azure DevOps run #${esc(r.request.ado_run_id)} ↗</a>` : `<strong>Host test</strong><span class="sub">${esc(r.request.ado_run_id)}</span>`}</div>
+          <div class="kv"><span>Source</span><a href="${esc(r.request.ado_run_url)}" target="_blank" rel="noopener noreferrer">Azure DevOps run #${esc(r.request.ado_run_id)} ↗</a></div>
           <div class="kv"><span>DefectDojo</span>${badge(dojo.status || 'pending')}${dojo.url ? ` <a href="${esc(dojo.url)}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}</div>
         </div>`,
       findings: `
@@ -257,13 +284,13 @@ async function renderDetail(keepPosition){
           findings.map(f => `<tr data-sevrow="${esc(f.severity)}"><td>${badge(f.severity)}</td>
             <td><strong>${esc(f.rule)}</strong> <span class="muted">${esc(f.tool || '')}${f.category ? ' · ' + esc(f.category.replaceAll('_',' ').toLowerCase()) : ''}</span><span class="sub">${esc(f.title)}</span>
             <span class="sub">${esc(f.remediation || '')}</span></td>
-            <td class="mono">${esc(f.file)}:${esc(f.line)}</td></tr>`).join('') + `</tbody></table>`
+            <td class="mono">${findingLocation(r, f)}</td></tr>`).join('') + `</tbody></table>`
           : '<p class="empty-note">No findings recorded.</p>'}</div></div>`,
       coverage: `
-        <p class="muted">Coverage · ${covered}/${inv.length} inputs</p>
+        <p class="muted">Coverage · ${esc(coverageLabel)} · ${inv.length - applicable} N/A</p>
         <div class="card"><div class="table-wrap"><table class="tbl">
-        <thead><tr><th>Input</th><th>Required scans</th><th>Status</th></tr></thead><tbody>
-        ${inv.map(x => `<tr><td class="mono">${esc(x.path)}</td><td class="muted">${esc((x.required_tools || []).join(', '))}</td><td>${badge(x.status)}</td></tr>`).join('')}
+        <thead><tr><th>Input</th><th>Required scans</th><th>Status / reason</th></tr></thead><tbody>
+        ${inv.map(x => `<tr><td class="mono">${esc(x.path)}</td><td class="muted">${esc((x.required_tools || []).join(', '))}</td><td>${badge(x.status)}${x.reason ? `<span class="sub">${esc(x.reason)}</span>` : ''}</td></tr>`).join('')}
         </tbody></table></div></div>`,
       evidence: `
         <p class="section-note">Server evidence is bound to this review and checked against its SHA-256 digest before download.</p>
@@ -306,7 +333,7 @@ function filterFindings(sev){
 function isMobile(){ return window.innerWidth < 1024; }
 function restorePanelState(){
   const p = $('ai-panel');
-  const collapsed = localStorage.getItem('tke-ai-collapsed') === '1';
+  const collapsed = localStorage.getItem('tke-ai-collapsed') !== '0';
   p.classList.toggle('collapsed', collapsed && !isMobile());
   $('ai-collapse').textContent = collapsed ? '›' : '‹';
   $('ai-collapse').title = collapsed ? 'Expand' : 'Collapse';
@@ -491,8 +518,8 @@ async function refreshComponents(){
 }
 
 /* ---------- events ---------- */
-['review-search','decision-filter','source-filter'].forEach(id => $(id).addEventListener(id === 'review-search' ? 'input' : 'change', () => { listPage = 0; renderReviewRows(); }));
-$('clear-filters').addEventListener('click', () => { $('review-search').value = ''; $('decision-filter').value = 'all'; $('source-filter').value = 'all'; listPage = 0; renderReviewRows(); });
+['review-search','decision-filter'].forEach(id => $(id).addEventListener(id === 'review-search' ? 'input' : 'change', () => { listPage = 0; renderReviewRows(); }));
+$('clear-filters').addEventListener('click', () => { $('review-search').value = ''; $('decision-filter').value = 'all'; listPage = 0; renderReviewRows(); });
 $('prev-page').addEventListener('click', () => { listPage--; renderReviewRows(); });
 $('next-page').addEventListener('click', () => { listPage++; renderReviewRows(); });
 $('detail-tabs').addEventListener('keydown', e => {
@@ -542,13 +569,8 @@ document.addEventListener('click', async e => {
     catch{ prompt('Copy review link:', url); return; }
     setTimeout(() => e.target.textContent = 'Copy link', 1500); return;
   }
-  if(e.target?.id === 'copy-curl' && detailId){
-    const cmd = `curl --fail --show-error --cacert deploy/tke-gate-ca.crt "${location.origin}/api/v1/reviews/${detailId}" | python3 -m json.tool`;
-    try{ await navigator.clipboard.writeText(cmd); e.target.textContent = 'Copied!'; }
-    catch{ prompt('Copy curl:', cmd); return; }
-    setTimeout(() => e.target.textContent = 'Copy curl', 1500); return;
-  }
   try{
+    if(e.target.closest?.('a')) return;
     const row = e.target.closest?.('[data-review]');
     if(row){ nav('#review-' + row.dataset.review); return; }
     const chip = e.target.closest?.('[data-artifact]');

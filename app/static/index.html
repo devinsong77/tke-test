@@ -39,12 +39,11 @@
         <div class="list-tools">
           <label class="search-field"><span class="sr-only">Search reviews</span><input id="review-search" type="search" placeholder="Search run, repository, commit…"></label>
           <label><span class="sr-only">Decision filter</span><select id="decision-filter"><option value="all">All decisions</option><option>PASS</option><option>BLOCK</option><option>ERROR</option><option value="running">Running</option><option value="queued">Queued</option></select></label>
-          <label><span class="sr-only">Source filter</span><select id="source-filter"><option value="all">All sources</option><option value="pipeline">Azure Pipelines</option><option value="host">Host tests</option></select></label>
         </div>
         <div class="table-wrap">
           <table class="tbl">
             <thead><tr>
-              <th>Decision</th><th>Review / source</th><th>Repository / commit</th>
+              <th>Decision</th><th>Pipeline run</th><th>Repository / commit</th>
               <th>Duration</th><th>Dojo sync</th><th>Created</th>
             </tr></thead>
             <tbody id="reviews"></tbody>
@@ -68,7 +67,6 @@
         </div>
         <div class="detail-actions">
           <button id="copy-link" class="btn">Copy link</button>
-          <button id="copy-curl" class="btn">Copy curl</button>
         </div>
       </div>
       <nav class="tabs" id="detail-tabs" role="tablist" aria-label="Review sections"></nav>

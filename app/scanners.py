@@ -90,7 +90,8 @@ def scan_gitleaks(src, dest, rid, request, policy):
         exits.append(code)
     core.atomic_json(dest / 'gitleaks.json', combined)
     items = [finding('gitleaks', x['RuleID'], 'HIGH', x['Description'], x['File'], x['StartLine'],
-                     remediation='Revoke any real credential, remove it from code/history, and use a secret store.') for x in combined]
+                     remediation='Revoke any real credential, remove it from code/history, and use a secret store.')
+             | {'commit_sha': x.get('Commit') or request['commit_sha']} for x in combined]
     items = list({x['fingerprint']: x for x in items}.values())
     return {'exit_code': exits, 'scope': ['working tree', 'complete history reachable from requested commit']}, items
 

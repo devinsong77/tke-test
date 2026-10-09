@@ -244,18 +244,18 @@ async def create_review(request: Request, auth=Depends(identity)):
 @app.get('/api/v1/reviews')
 def list_reviews(auth=Depends(optional_identity)):
     with core.db() as con:
-        rows = con.execute('SELECT * FROM reviews ORDER BY created DESC LIMIT 100').fetchall()
+        rows = con.execute('SELECT * FROM reviews ORDER BY created DESC').fetchall()
     if auth is None:
-        return {'reviews': [core.public_review(r) for r in rows]}
-    return {'reviews': [core.public_review(r) for r in rows if visible(r, auth[1])]}
+        return {'reviews': [core.public_review(r) for r in rows if core.is_pipeline_review(r)][:100]}
+    return {'reviews': [core.public_review(r) for r in rows if visible(r, auth[1])][:100]}
 
 
 def get_row(rid, client):
     with core.db() as con:
         row = con.execute('SELECT * FROM reviews WHERE id=?', (rid,)).fetchone()
-    # Public dashboard access (client is None) can see all reviews;
+    # Public dashboard access only exposes pipeline reviews;
     # authenticated callers are still scoped to their repositories.
-    if row is None or (client is not None and not visible(row, client)):
+    if row is None or (client is None and not core.is_pipeline_review(row)) or (client is not None and not visible(row, client)):
         raise HTTPException(404, 'Review not found')
     return row
 

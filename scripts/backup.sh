@@ -8,7 +8,8 @@ trap 'systemctl start governance-api governance-worker' EXIT
 systemctl stop governance-api governance-worker
 cd "$base"
 umask 077
-tar -czf "$backup_dir/governance.tar.gz" config data .env
+tar --exclude=data/trivy-cache --exclude=data/work -czf "$backup_dir/governance.tar.gz" config data .env
+cp compose.tools.yml "$backup_dir/"
 cp /etc/nginx/ssl/fullchain.crt /etc/nginx/ssl/server.key "$backup_dir/"
 docker compose -f compose.tools.yml exec -T sonar-db pg_dump -U sonar sonar > "$backup_dir/sonar.sql"
 docker compose -f compose.tools.yml exec -T dojo-db pg_dump -U dojo dojo > "$backup_dir/dojo.sql"

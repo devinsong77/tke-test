@@ -124,3 +124,34 @@ def test_maintainability_is_visible_but_not_security_block(setup):
     security = {'tool': 'sonarqube', 'category': 'VULNERABILITY', 'severity': 'HIGH'}
     assert core.evaluate(payload(), [], clean_scans(), [quality], core.policy())['status'] == 'PASS'
     assert core.evaluate(payload(), [], clean_scans(), [security], core.policy())['status'] == 'BLOCK'
+
+
+def test_public_dashboard_excludes_host_reviews(setup):
+    pipeline_id = setup.post('/api/v1/reviews', **signed()).json()['review_id']
+    host = payload()
+    host['ado_run_id'] = 'host-smoke-123'
+    host_id = setup.post('/api/v1/reviews', **signed(host, idem='host-smoke-test')).json()['review_id']
+    assert [r['review_id'] for r in setup.get('/api/v1/reviews').json()['reviews']] == [pipeline_id]
+    for suffix in ('', '/audit'):
+        assert setup.get(f'/api/v1/reviews/{host_id}{suffix}').status_code == 404
+    assert setup.get(f'/api/v1/reviews/{pipeline_id}').status_code == 200
+    assert setup.get(f'/api/v1/reviews/{host_id}', headers={'Authorization': 'Bearer read-token'}).status_code == 200
+
+
+def test_public_review_github_metadata_preserves_request(setup):
+    rid = setup.post('/api/v1/reviews', **signed()).json()['review_id']
+    result = setup.get('/api/v1/reviews/' + rid).json()
+    assert result['repository_url'] == 'https://github.com/example/pilot'
+    assert core.digest(result['request']) == result['request_digest']
+
+
+@pytest.mark.parametrize('clone, expected', [
+    ('https://github.com/example/repo.git', 'https://github.com/example/repo'),
+    ('git@github.com:example/repo.git', 'https://github.com/example/repo'),
+    ('https://token@github.com/example/repo.git', None),
+    ('/private/repo.git', None),
+    ('https://github.com.evil.test/example/repo', None),
+])
+def test_github_repository_url(setup, clone, expected):
+    (core.CONFIG / 'repositories.json').write_text(json.dumps({'pilot': {'url': clone}}))
+    assert core.github_repository_url('pilot') == expected

@@ -1,6 +1,6 @@
 # API contract
 
-All API endpoints except `/healthz` require `Authorization: Bearer <token>`. Reviewer tokens can only read their registered repositories. Pipeline tokens can create requests only for their allowlisted repositories and ADO project URL prefix. Lists are limited to the latest 100 reviews. API request size is capped at 8 KiB (16 KiB reverse proxy cap).
+The dashboard, component health, and reads of numeric ADO-run reviews (including audit and registered artifacts) are public. Anonymous access excludes host smoke reviews. Valid reviewer tokens scope reads to their registered repositories and can access authorized host tests. `POST /api/v1/reviews` requires Bearer authentication plus HMAC; pipeline credentials are limited to allowlisted repositories and ADO project URL prefixes. Manual analysis generation requires authentication; advisory chat does not change Gate decisions. Lists are limited to the latest 100 visible reviews. API request size is capped at 8 KiB (16 KiB reverse proxy cap).
 
 ## POST /api/v1/reviews
 
