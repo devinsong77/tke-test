@@ -58,33 +58,14 @@ def analyze(review_id, result):
     cfg = _config()
     if cfg is None:
         raise RuntimeError('AI analyst not configured (no API key)')
-    body = {
-        'model': cfg.get('model', 'gpt-4o-mini'),
-        'messages': [
-            {'role': 'system', 'content': SYSTEM_PROMPT},
-            {'role': 'user', 'content': build_prompt(result)},
-        ],
-        'max_tokens': 1200,
-        'temperature': 0.2,
-    }
-    req = urllib.request.Request(
-        cfg.get('base_url', 'https://api.openai.com/v1').rstrip('/') + '/chat/completions',
-        data=json.dumps(body).encode(),
-        headers={'Content-Type': 'application/json',
-                 'Authorization': 'Bearer ' + cfg['api_key']},
-        method='POST')
     started = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.load(resp)
-    except Exception as e:
-        raise RuntimeError(f'LLM API call failed: {type(e).__name__}: {e}'[:300])
-    text = (data.get('choices') or [{}])[0].get('message', {}).get('content', '').strip()
-    if not text:
-        raise RuntimeError('LLM returned empty analysis')
+    text, model = _llm_call(cfg, [
+        {'role': 'system', 'content': SYSTEM_PROMPT},
+        {'role': 'user', 'content': build_prompt(result)},
+    ], max_tokens=1200)
     return {
         'review_id': review_id,
-        'model': body['model'],
+        'model': model,
         'generated_at': time.time(),
         'duration_seconds': round(time.time() - started, 1),
         'brief': text,
@@ -98,6 +79,107 @@ def get_cached(review_id):
     if path.is_file():
         return json.loads(path.read_text())
     return None
+
+
+def auto_generate(review_id):
+    """Best-effort auto-generation on terminal state. Never raises: the gate
+    decision is already durable by the time this runs, and analysis is
+    strictly advisory. Failures are recorded in the audit trail only."""
+    try:
+        generate_and_store(review_id)
+    except Exception as e:
+        try:
+            core.audit(review_id, 'analysis.auto_failed', {'error': str(e)[:200]})
+        except Exception:
+            pass
+
+
+CHAT_SYSTEM_PROMPT = """You are a senior application security analyst answering follow-up questions
+about one specific automated security review. You are given the review's decision,
+reasons, scanner outcomes, and findings as JSON context.
+
+Rules:
+- Answer ONLY from the provided findings data. Do not invent findings, files, or severities.
+- Keep answers concise (under 150 words unless the user asks for detail).
+- Do not reveal secret values (they are redacted in the input).
+- You are read-only: you cannot change the review, its decision, or any finding.
+  If asked to change something, explain you can only explain, not modify.
+- If the question cannot be answered from the findings, say so plainly."""
+
+
+def _llm_call(cfg, messages, max_tokens=800):
+    body = {
+        'model': cfg.get('model', 'gpt-4o-mini'),
+        'messages': messages,
+        'max_tokens': max_tokens,
+        'temperature': 0.2,
+    }
+    req = urllib.request.Request(
+        cfg.get('base_url', 'https://api.openai.com/v1').rstrip('/') + '/chat/completions',
+        data=json.dumps(body).encode(),
+        headers={'Content-Type': 'application/json',
+                 'Authorization': 'Bearer ' + cfg['api_key']},
+        method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.load(resp)
+    except Exception as e:
+        raise RuntimeError(f'LLM API call failed: {type(e).__name__}: {e}'[:300])
+    text = (data.get('choices') or [{}])[0].get('message', {}).get('content', '').strip()
+    if not text:
+        raise RuntimeError('LLM returned empty response')
+    return text, body['model']
+
+
+def chat(review_id, message, history=None):
+    """Answer a follow-up question grounded on the review's findings.
+
+    Read-only: never modifies the review, decision, or findings. The
+    conversation is stored separately as advisory material.
+    """
+    cfg = _config()
+    if cfg is None:
+        raise RuntimeError('AI analyst not configured (no API key)')
+    with core.db() as con:
+        row = con.execute('SELECT * FROM reviews WHERE id=?', (review_id,)).fetchone()
+    if row is None:
+        raise ValueError('Review not found')
+    if row['status'] not in core.TERMINAL:
+        raise ValueError('Review has no terminal decision yet')
+    message = (message or '').strip()
+    if not message:
+        raise ValueError('Message is empty')
+    if len(message) > 2000:
+        raise ValueError('Message too long (max 2000 chars)')
+    history = history or []
+    # Keep only the last 10 turns to bound context; sanitize to role/content pairs
+    clean_hist = []
+    for h in history[-10:]:
+        if isinstance(h, dict) and h.get('role') in ('user', 'assistant') and h.get('content'):
+            clean_hist.append({'role': h['role'], 'content': str(h['content'])[:2000]})
+    context = build_prompt(json.loads(row['result']))
+    messages = [
+        {'role': 'system', 'content': CHAT_SYSTEM_PROMPT},
+        {'role': 'user', 'content': 'Review findings context:\n' + context},
+    ] + clean_hist + [
+        {'role': 'user', 'content': message},
+    ]
+    reply, model = _llm_call(cfg, messages)
+    entry = {'role': 'user', 'content': message, 'at': time.time()}
+    reply_entry = {'role': 'assistant', 'content': reply, 'at': time.time(), 'model': model}
+    path = core.DATA / 'reviews' / review_id / 'ai-chat.json'
+    convo = json.loads(path.read_text()) if path.is_file() else []
+    convo.extend([entry, reply_entry])
+    core.atomic_json(path, convo[-40:])  # keep last 40 messages
+    core.audit(review_id, 'analysis.chat', {'model': model})
+    return {'reply': reply, 'model': model}
+
+
+def get_chat(review_id):
+    path = core.DATA / 'reviews' / review_id / 'ai-chat.json'
+    if path.is_file():
+        return json.loads(path.read_text())
+    return []
 
 
 def generate_and_store(review_id):

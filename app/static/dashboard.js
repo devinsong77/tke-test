@@ -1,50 +1,318 @@
 'use strict';
-let token = '', selected = null, busy = false;
+/* TKE Governance Lab dashboard — read-only review explorer + AI analyst. */
+let token = '', selected = null, busy = false, analysisTimer = null;
+
 const $ = id => document.getElementById(id);
-const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
-const badge = value => `<span class="status ${/^[A-Za-z_]+$/.test(value) ? value : ''}">${escapeHtml(value)}</span>`;
-const date = ts => new Date(ts * 1000).toLocaleString();
-async function api(path) { const response = await fetch(path, {headers:{Authorization:`Bearer ${token}`}}); if(!response.ok) throw new Error(`Request failed (${response.status}). Check access or service health.`); return response.json(); }
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const badge = v => `<span class="badge st-${/^[A-Za-z_]+$/.test(v) ? v : 'x'}">${esc(v)}</span>`;
+const fmtDate = ts => new Date(ts * 1000).toLocaleString();
+
+/* ---------- tiny markdown renderer (no external deps; CSP is script-src 'self') ---------- */
+function mdInline(s){
+  s = esc(s);
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/(^|\W)\*([^*\n]+)\*/g, '$1<em>$2</em>');
+  s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  return s;
+}
+function md(src){
+  const lines = String(src || '').split('\n');
+  let html = '', inList = null, inCode = false, para = [];
+  const flushPara = () => { if(para.length){ html += `<p>${mdInline(para.join(' '))}</p>`; para = []; } };
+  const closeList = () => { if(inList){ html += inList === 'ul' ? '</ul>' : '</ol>'; inList = null; } };
+  for(const raw of lines){
+    const line = raw.replace(/\s+$/, '');
+    if(line.startsWith('```')){ flushPara(); closeList(); html += inCode ? '</code></pre>' : '<pre><code>'; inCode = !inCode; continue; }
+    if(inCode){ html += esc(raw) + '\n'; continue; }
+    let m;
+    if(m = line.match(/^(#{1,3})\s+(.*)/)){ flushPara(); closeList(); const lvl = Math.min(m[1].length + 1, 3); html += `<h${lvl}>${mdInline(m[2])}</h${lvl}>`; continue; }
+    if(/^---+$/.test(line)){ flushPara(); closeList(); html += '<hr>'; continue; }
+    if(m = line.match(/^>\s?(.*)/)){ flushPara(); closeList(); html += `<blockquote>${mdInline(m[1])}</blockquote>`; continue; }
+    if(m = line.match(/^(\s*)[-*]\s+(.*)/)){ flushPara(); if(inList !== 'ul'){ closeList(); html += '<ul>'; inList = 'ul'; } html += `<li>${mdInline(m[2])}</li>`; continue; }
+    if(m = line.match(/^\s*\d+[.)]\s+(.*)/)){ flushPara(); if(inList !== 'ol'){ closeList(); html += '<ol>'; inList = 'ol'; } html += `<li>${mdInline(m[1])}</li>`; continue; }
+    if(!line.trim()){ flushPara(); closeList(); continue; }
+    para.push(line.trim());
+  }
+  flushPara(); closeList();
+  if(inCode) html += '</code></pre>';
+  return html || '<p class="muted">Empty response.</p>';
+}
+
+/* ---------- api ---------- */
+async function api(path, opts = {}){
+  const r = await fetch(path, {headers:{Authorization:`Bearer ${token}`}, ...opts});
+  if(!r.ok) throw new Error(`Request failed (${r.status}). Check access or service health.`);
+  return r.json();
+}
+function showError(msg){ const m = $('message'); m.hidden = !msg; m.textContent = msg || ''; }
+
+/* ---------- list view ---------- */
 async function refresh(){
- if(!token || busy) return; busy=true;
- try{
-  const data=await api('/api/v1/reviews'); $('message').textContent=''; $('login').hidden=true; $('workspace').hidden=false;
-  $('metrics').innerHTML=[['Total reviews',data.reviews.length],['Passed',data.reviews.filter(x=>x.status==='PASS').length],['Blocked',data.reviews.filter(x=>x.status==='BLOCK').length],['Errors',data.reviews.filter(x=>x.status==='ERROR').length]].map(([label,count])=>`<div class="metric"><span>${label}</span><strong>${count}</strong></div>`).join('');
-  $('reviews').innerHTML=data.reviews.map(r=>`<tr><td>${badge(r.status)}</td><td>${escapeHtml(r.request.repository)}<small><code>${escapeHtml(r.request.commit_sha.slice(0,12))}</code></small></td><td><button class="link" data-review="${escapeHtml(r.review_id)}">${escapeHtml(r.review_id.slice(0,12))}</button><small>Run ${escapeHtml(r.request.ado_run_id)}</small></td><td>${r.result?.duration_seconds != null ? escapeHtml(r.result.duration_seconds)+'s':'—'}</td><td>${badge(r.dojo.status||'pending')}</td><td>${escapeHtml(date(r.created_at))}</td></tr>`).join('');
-  $('empty').hidden=!!data.reviews.length; $('updated').textContent=`Updated ${new Date().toLocaleTimeString()}`;
-  if(selected) await details(selected);
- }catch(e){$('message').textContent=e.message;}finally{busy=false;}
+  if(!token || busy) return; busy = true;
+  try{
+    const data = await api('/api/v1/reviews');
+    showError('');
+    $('login').hidden = true; $('workspace').hidden = false;
+    const rs = data.reviews || [];
+    const n = s => rs.filter(x => x.status === s).length;
+    $('metrics').innerHTML = [
+      ['Total reviews', rs.length, ''],
+      ['Passed', n('PASS'), 's-pass'],
+      ['Blocked', n('BLOCK'), 's-block'],
+      ['Errors', n('ERROR'), 's-error'],
+    ].map(([l, c, cls]) => `<div class="stat ${cls}"><span>${l}</span><strong>${c}</strong></div>`).join('');
+    $('reviews').innerHTML = rs.map(r => `<tr>
+      <td>${badge(r.status)}</td>
+      <td>${esc(r.request.repository)}<small><code>${esc((r.request.commit_sha || '').slice(0, 12))}</code></small></td>
+      <td><button class="rowlink" data-review="${esc(r.review_id)}">${esc(r.review_id.slice(0, 12))}</button><small>Run ${esc(r.request.ado_run_id)}</small></td>
+      <td>${r.result?.duration_seconds != null ? esc(r.result.duration_seconds) + 's' : '—'}</td>
+      <td>${badge(r.dojo?.status || 'pending')}</td>
+      <td>${esc(fmtDate(r.created_at))}</td></tr>`).join('');
+    $('empty').hidden = !!rs.length;
+    $('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    if(selected) await details(selected, true);
+  }catch(e){ showError(e.message); }
+  finally{ busy = false; }
 }
-async function details(id){
- selected=id; const r=await api(`/api/v1/reviews/${encodeURIComponent(id)}`); const d=r.result||{};
- $('detail').hidden=false;
- $('detail').innerHTML=`<div class="section-title"><div><p class="eyebrow">REVIEW DETAIL</p><h2>${badge(r.status)} &nbsp; ${escapeHtml(r.request.repository)}</h2></div><code>${escapeHtml(r.review_id)}</code> <button id="copy-link" class="secondary" style="padding:6px 12px;font-size:11px">Copy link</button> <button id="copy-curl" class="secondary" style="padding:6px 12px;font-size:11px">Copy curl</button></div>
-<div style="display:flex;align-items:center;gap:0;margin:22px 0 6px;flex-wrap:wrap">
-${(()=>{const steps=[['queued','Queued'],['running','Running'],[r.status,r.status]];return steps.map((st,i)=>{
-const done=r.status==='PASS'||r.status==='BLOCK'||r.status==='ERROR'?true:(r.status==='running'?i<=1:i===0);
-const cur=(r.status===st[0])||(i===2&&(r.status==='PASS'||r.status==='BLOCK'||r.status==='ERROR'));
-const col=r.status==='PASS'?'#3b681e':r.status==='BLOCK'?'#a14d2c':r.status==='ERROR'?'#a03551':'#3c6094';
-return `<div style="display:flex;align-items:center"><div style="text-align:center"><div style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;${done?`background:${col};color:#fff`:'background:#edf0ee;color:#999'}">${done?'✓':i+1}</div><div style="font-size:10px;margin-top:6px;color:#666">${st[1]}</div></div>${i<2?`<div style="width:44px;height:2px;background:${done?'#9ab781':'#e0e0e0'};margin:0 8px 20px"></div>`:''}</div>`}).join('')})()}
-</div><div class="reason">${escapeHtml((d.reasons||['Review is waiting for a terminal decision.']).join(' · '))}</div><div class="detail-grid"><div><span>Commit / policy</span><code>${escapeHtml(r.request.commit_sha)}</code><small>${escapeHtml(r.request.policy_version)}</small></div><div><span>Pipeline provenance</span><a href="${escapeHtml(r.request.ado_run_url)}" target="_blank" rel="noopener noreferrer">Azure DevOps Run ${escapeHtml(r.request.ado_run_id)}</a></div></div><h3>Scanner execution</h3><div class="table-wrap"><table><thead><tr><th>Tool</th><th>Status</th><th>Duration</th><th>Evidence / outcome</th></tr></thead><tbody>${Object.entries(d.scanners||{}).map(([name,s])=>`<tr><td>${escapeHtml(name)}<small>${escapeHtml(s.image||'')}</small></td><td>${badge(s.status)}</td><td>${escapeHtml(s.duration_seconds??'—')}s</td><td>${escapeHtml(s.error||`Exit ${JSON.stringify(s.exit_code)}${s.quality_gate?' · Quality Gate '+s.quality_gate:''}`)}</td></tr>`).join('')}</tbody></table></div><h3>Coverage · ${(d.inventory||[]).filter(x=>x.status==='covered').length}/${(d.inventory||[]).length} objects covered</h3><div class="table-wrap"><table><thead><tr><th>Input</th><th>Required scans</th><th>Status</th></tr></thead><tbody>${(d.inventory||[]).map(x=>`<tr><td><code>${escapeHtml(x.path)}</code></td><td>${escapeHtml(x.required_tools.join(', '))}</td><td>${badge(x.status)}</td></tr>`).join('')}</tbody></table></div><h3>Findings <span style="font-weight:400;font-size:12px">
-<button class="fbtn secondary" data-sev="ALL" style="padding:4px 10px;margin:0 2px">All</button><button class="fbtn secondary" data-sev="CRITICAL" style="padding:4px 10px;margin:0 2px">Critical</button><button class="fbtn secondary" data-sev="HIGH" style="padding:4px 10px;margin:0 2px">High</button><button class="fbtn secondary" data-sev="MEDIUM" style="padding:4px 10px;margin:0 2px">Medium</button><button class="fbtn secondary" data-sev="LOW" style="padding:4px 10px;margin:0 2px">Low</button><span id="fcount" class="muted"></span></span></h3><div id="findings-body"> · ${(d.findings||[]).length}</h3>${(d.findings||[]).length?`<div class="table-wrap"><table><thead><tr><th>Severity</th><th>Rule / finding</th><th>Location / remediation</th></tr></thead><tbody>${d.findings.map(f=>`<tr><td>${badge(f.severity)}</td><td>${escapeHtml(f.rule)}<small>${escapeHtml(f.title)}</small></td><td><code>${escapeHtml(f.file)}:${escapeHtml(f.line)}</code><small>${escapeHtml(f.remediation)}</small></td></tr>`).join('')}</tbody></table></div>`:'<p class="muted">No findings recorded. Coverage and scanner health remain part of the decision.</p>'}</div><h3>DefectDojo</h3><p>${badge(r.dojo.status||'pending')} ${escapeHtml(r.dojo.error||'')} ${r.dojo.url?`<a target="_blank" rel="noopener noreferrer" href="${escapeHtml(r.dojo.url)}">Open engagement ↗</a>`:''}</p><h3>AI analyst brief <span class="muted" style="font-weight:400">advisory only — not part of the gate decision</span></h3><div id="ai-analysis"><p class="muted">No AI brief yet.</p><button id="ai-generate" class="secondary">Generate AI brief</button></div><div id="ai-content" hidden></div><h3>Evidence artifacts</h3><div class="artifacts">${Object.keys(d.artifacts||{}).map(name=>`<button data-artifact="${escapeHtml(name)}">↓ ${escapeHtml(name)}</button>`).join('')}<button id="audit">View audit trail</button></div><pre id="audit-data" hidden></pre>`;
+
+/* ---------- timeline ---------- */
+function timeline(status){
+  const steps = [['queued','Queued'], ['running','Running'], [status, status]];
+  const terminal = ['PASS','BLOCK','ERROR'].includes(status);
+  const color = status === 'PASS' ? '#35701a' : status === 'BLOCK' ? '#a34e22' : status === 'ERROR' ? '#a1304f' : '#375f96';
+  return `<div class="timeline" style="--tc:${color}">` + steps.map(([key, label], i) => {
+    const done = terminal ? true : (status === 'running' ? i <= 1 : i === 0);
+    return `<div class="tstep${done ? ' done' : ''}"><div class="tnode">
+      <span class="tdot">${done ? '✓' : i + 1}</span><small>${esc(label)}</small></div>`
+      + (i < 2 ? '<span class="tlink"></span>' : '') + `</div>`;
+  }).join('') + '</div>';
 }
-async function loadAnalysis(id){const box=$('ai-content'),wrap=$('ai-analysis');try{const a=await api(`/api/v1/reviews/${encodeURIComponent(id)}/analysis`);box.hidden=false;box.innerHTML=`<div class="reason" style="border-color:#b9a7e6;background:#f6f3fd"><p class="muted" style="margin:0 0 10px">Model: ${escapeHtml(a.model)} · generated ${escapeHtml(date(a.generated_at))}</p><div style="white-space:pre-wrap">${escapeHtml(a.brief)}</div><p class="muted" style="margin:12px 0 0"><em>${escapeHtml(a.disclaimer)}</em></p></div>`;wrap.querySelector('p').hidden=true;}catch(e){box.hidden=true;}}
-document.addEventListener('click',async e=>{if(e.target&&e.target.id==='ai-generate'){e.target.disabled=true;e.target.textContent='Generating…';try{await fetch(`/api/v1/reviews/${encodeURIComponent(selected)}/analysis`,{method:'POST',headers:{Authorization:`Bearer ${token}`}});await loadAnalysis(selected);}catch(err){$('message').textContent='AI brief unavailable: '+err.message;}e.target.disabled=false;e.target.textContent='Generate AI brief';}});
-const _details=details;details=async function(id){await _details(id);loadAnalysis(id);};
-$('login-form').addEventListener('submit' ,e=>{e.preventDefault();token=$('token').value.trim();$('token').value='';refresh();});
-$('refresh').addEventListener('click',refresh);
-$('overview').addEventListener('click',()=>{selected=null;$('detail').hidden=true;refresh();});
-document.addEventListener('click',async e=>{
-const fbtn=e.target.closest&&e.target.closest('.fbtn');
-if(fbtn&&selected){const sev=fbtn.dataset.sev;document.querySelectorAll('.fbtn').forEach(b=>{b.style.fontWeight=b===fbtn?'700':'400';b.style.background=b===fbtn?'#264b40':'white';b.style.color=b===fbtn?'white':'#344f46';});
-const rows=document.querySelectorAll('#findings-body tbody tr');let vis=0;
-rows.forEach(tr=>{const td=tr.querySelector('td');const show=sev==='ALL'||(td&&td.textContent.trim()===sev);tr.style.display=show?'':'none';if(show)vis++;});
-document.getElementById('fcount').textContent=` showing ${vis}/${rows.length}`;return;}
-if(e.target&&e.target.id==='copy-link'){const url=location.origin+location.pathname+'#review-'+selected;(navigator.clipboard?navigator.clipboard.writeText(url):Promise.reject()).then(()=>{e.target.textContent='Copied!';setTimeout(()=>e.target.textContent='Copy link',1500);}).catch(()=>{prompt('Copy review link:',url);});return;}
-if(e.target&&e.target.id==='copy-curl'){const cmd=`curl -sk --cacert deploy/tke-gate-ca.crt -H "Authorization: Bearer $TOKEN" "https://64.90.11.59:8443/api/v1/reviews/${selected}" | python3 -m json.tool`;(navigator.clipboard?navigator.clipboard.writeText(cmd):Promise.reject()).then(()=>{e.target.textContent='Copied!';setTimeout(()=>e.target.textContent='Copy curl',1500);}).catch(()=>{prompt('Copy curl:',cmd);});return;}
-try{
- const review=e.target.closest('[data-review]'); if(review){await details(review.dataset.review);$('detail').scrollIntoView({behavior:'smooth'});}
- const artifact=e.target.closest('[data-artifact]'); if(artifact){const data=await api(`/api/v1/reviews/${selected}/artifacts/${encodeURIComponent(artifact.dataset.artifact)}`); const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'})); const a=document.createElement('a');a.href=url;a.download=artifact.dataset.artifact;a.click();URL.revokeObjectURL(url);}
- if(e.target.id==='audit'){const d=await api(`/api/v1/reviews/${selected}/audit`);$('audit-data').hidden=false;$('audit-data').textContent=JSON.stringify(d,null,2);}
-}catch(error){$('message').textContent=error.message;}});
-setInterval(refresh,15000);
+
+/* ---------- detail view ---------- */
+async function details(id, keepScroll){
+  if(analysisTimer){ clearInterval(analysisTimer); analysisTimer = null; }
+  selected = id;
+  const r = await api(`/api/v1/reviews/${encodeURIComponent(id)}`);
+  const d = r.result || {};
+  const el = $('detail');
+  el.hidden = false;
+  const inv = d.inventory || [], covered = inv.filter(x => x.status === 'covered').length;
+  const findings = d.findings || [];
+
+  el.innerHTML = `
+  <div class="detail-top">
+    <div><p class="eyebrow">Review detail</p>
+      <h2>${badge(r.status)}&nbsp;&nbsp;${esc(r.request.repository)}</h2>
+      <div class="review-id">${esc(r.review_id)}</div>
+    </div>
+    <div class="detail-actions">
+      <button class="btn btn-ghost btn-sm" id="copy-link">Copy link</button>
+      <button class="btn btn-ghost btn-sm" id="copy-curl">Copy curl</button>
+    </div>
+  </div>
+  ${timeline(r.status)}
+  <div class="reason">${esc((d.reasons || ['Review is waiting for a terminal decision.']).join(' · '))}</div>
+  <div class="kv-grid">
+    <div class="kv"><span>Commit / policy</span><code>${esc(r.request.commit_sha)}</code><div class="small muted" style="margin-top:6px">${esc(r.request.policy_version)} · ${esc((r.request.policy_digest || '').slice(0, 16))}</div></div>
+    <div class="kv"><span>Pipeline provenance</span><a href="${esc(r.request.ado_run_url)}" target="_blank" rel="noopener noreferrer">Azure DevOps run ${esc(r.request.ado_run_id)} ↗</a></div>
+  </div>
+
+  <h3>Scanner execution</h3>
+  <div class="table-wrap"><table class="tbl"><thead><tr><th>Tool</th><th>Status</th><th>Duration</th><th>Evidence / outcome</th></tr></thead>
+  <tbody>${Object.entries(d.scanners || {}).map(([name, s]) => `<tr>
+    <td><strong>${esc(name)}</strong><small>${esc(s.image || '')}</small></td>
+    <td>${badge(s.status)}</td>
+    <td>${s.duration_seconds != null ? esc(s.duration_seconds) + 's' : '—'}</td>
+    <td class="small">${esc(s.error || `Exit ${JSON.stringify(s.exit_code)}${s.quality_gate ? ' · Quality Gate ' + s.quality_gate : ''}`)}</td>
+  </tr>`).join('')}</tbody></table></div>
+
+  <h3>Coverage · ${covered}/${inv.length} objects</h3>
+  <div class="table-wrap"><table class="tbl"><thead><tr><th>Input</th><th>Required scans</th><th>Status</th></tr></thead>
+  <tbody>${inv.map(x => `<tr><td><code>${esc(x.path)}</code></td><td class="small">${esc((x.required_tools || []).join(', '))}</td><td>${badge(x.status)}</td></tr>`).join('')}</tbody></table></div>
+
+  <h3>Findings · ${findings.length}</h3>
+  <div class="fbar" id="fbar">
+    ${['ALL','CRITICAL','HIGH','MEDIUM','LOW'].map(s => `<button class="fbtn${s === 'ALL' ? ' on' : ''}" data-sev="${s}">${s[0] + s.slice(1).toLowerCase()}</button>`).join('')}
+    <span class="fcount" id="fcount"></span>
+  </div>
+  <div id="findings-body">${findings.length ? `<div class="table-wrap"><table class="tbl"><thead><tr><th>Severity</th><th>Rule / finding</th><th>Location / remediation</th></tr></thead>
+  <tbody>${findings.map(f => `<tr data-sevrow="${esc(f.severity)}"><td>${badge(f.severity)}</td>
+    <td><strong>${esc(f.rule)}</strong> <span class="small muted">${esc(f.tool || '')}</span><small>${esc(f.title)}</small></td>
+    <td><code>${esc(f.file)}:${esc(f.line)}</code><small>${esc(f.remediation)}</small></td></tr>`).join('')}</tbody></table></div>`
+    : '<p class="muted">No findings recorded. Coverage and scanner health remain part of the decision.</p>'}</div>
+
+  <h3>DefectDojo</h3>
+  <p>${badge(r.dojo?.status || 'pending')} <span class="small muted">${esc(r.dojo?.error || '')}</span>
+  ${r.dojo?.url ? `<a href="${esc(r.dojo.url)}" target="_blank" rel="noopener noreferrer">Open engagement ↗</a>` : ''}</p>
+
+  <div class="ai-card">
+    <div class="ai-head"><h3>AI analyst</h3><span class="ai-tag">Advisory only</span></div>
+    <p class="small muted" style="margin:0">Generated automatically when the review reaches a terminal decision. Never part of the gate decision.</p>
+    <div id="ai-body"><div class="spinner">Waiting for analysis…</div></div>
+    <div class="chat" id="chat">
+      <div class="ai-head"><h3 style="font-size:14px">Ask about these findings</h3></div>
+      <div class="chat-log" id="chat-log"><div class="chat-empty">Ask anything about this review&rsquo;s findings — e.g. &ldquo;Which finding should I fix first?&rdquo;</div></div>
+      <form class="chat-form" id="chat-form">
+        <input id="chat-input" type="text" placeholder="Ask about the findings…" autocomplete="off" maxlength="2000">
+        <button class="btn btn-primary" type="submit" id="chat-send">Send</button>
+      </form>
+      <p class="chat-hint">Read-only: the analyst can explain findings but cannot change the review or its decision.</p>
+    </div>
+  </div>
+
+  <h3>Evidence artifacts</h3>
+  <div class="chips">${Object.keys(d.artifacts || {}).map(n => `<button class="chip" data-artifact="${esc(n)}">↓ ${esc(n)}</button>`).join('')}
+  <button class="chip" id="audit-btn">View audit trail</button></div>
+  <pre id="audit-data" hidden></pre>`;
+
+  if(!keepScroll) el.scrollIntoView({behavior:'smooth', block:'start'});
+  loadAnalysis(id);
+  loadChat(id);
+}
+
+/* ---------- AI analysis (auto-generated server-side) ---------- */
+async function loadAnalysis(id, attempt = 0){
+  const box = $('ai-body');
+  if(!box || selected !== id) return;
+  try{
+    const a = await api(`/api/v1/reviews/${encodeURIComponent(id)}/analysis`);
+    if(selected !== id) return;
+    box.innerHTML = `
+      <p class="ai-meta">Model <strong>${esc(a.model)}</strong> · generated ${esc(fmtDate(a.generated_at))} · took ${esc(a.duration_seconds)}s</p>
+      <div class="md-body">${md(a.brief)}</div>
+      <p class="ai-disclaimer">${esc(a.disclaimer)}</p>`;
+  }catch(e){
+    // Not ready yet (auto-generation runs after terminal state) — retry a few times
+    if(attempt < 8 && selected === id){
+      box.innerHTML = `<div class="spinner">Analysis generating…</div>`;
+      analysisTimer = setTimeout(() => loadAnalysis(id, attempt + 1), 4000);
+    }else if(selected === id){
+      box.innerHTML = `<p class="muted">AI brief unavailable for this review.</p>`;
+    }
+  }
+}
+
+/* ---------- chat ---------- */
+function renderChat(messages){
+  const log = $('chat-log');
+  if(!messages.length){
+    log.innerHTML = `<div class="chat-empty">Ask anything about this review&rsquo;s findings — e.g. &ldquo;Which finding should I fix first?&rdquo;</div>`;
+    return;
+  }
+  log.innerHTML = messages.map(m => m.role === 'user'
+    ? `<div class="msg user">${esc(m.content)}<time>${m.at ? esc(fmtDate(m.at)) : ''}</time></div>`
+    : `<div class="msg bot"><div class="md-body">${md(m.content)}</div><time>${m.at ? esc(fmtDate(m.at)) : ''}${m.model ? ' · ' + esc(m.model) : ''}</time></div>`
+  ).join('');
+  log.scrollTop = log.scrollHeight;
+}
+async function loadChat(id){
+  try{
+    const d = await api(`/api/v1/reviews/${encodeURIComponent(id)}/chat`);
+    if(selected === id) renderChat(d.messages || []);
+  }catch(e){ /* chat unavailable — leave placeholder */ }
+}
+async function sendChat(message){
+  const log = $('chat-log'), input = $('chat-input'), btn = $('chat-send');
+  const history = [];
+  log.querySelectorAll('.msg').forEach(el => {
+    const isUser = el.classList.contains('user');
+    const text = el.querySelector('.md-body')?.textContent || el.childNodes[0]?.textContent || '';
+    history.push({role: isUser ? 'user' : 'assistant', content: text.trim().slice(0, 2000)});
+  });
+  const typing = document.createElement('div');
+  typing.className = 'msg bot typing'; typing.textContent = 'Analyst is thinking…';
+  // remove empty placeholder
+  const empty = log.querySelector('.chat-empty'); if(empty) empty.remove();
+  const um = document.createElement('div'); um.className = 'msg user'; um.textContent = message;
+  log.append(um, typing); log.scrollTop = log.scrollHeight;
+  input.value = ''; input.disabled = true; btn.disabled = true;
+  try{
+    const r = await fetch(`/api/v1/reviews/${encodeURIComponent(selected)}/chat`, {
+      method:'POST', headers:{'Authorization':`Bearer ${token}`, 'Content-Type':'application/json'},
+      body: JSON.stringify({message, history}),
+    });
+    if(!r.ok) throw new Error(`Chat failed (${r.status})`);
+    await r.json();
+    await loadChat(selected); // re-render from server (canonical history)
+  }catch(e){
+    typing.textContent = 'Chat unavailable: ' + e.message;
+    typing.classList.remove('typing');
+  }finally{
+    input.disabled = false; btn.disabled = false; input.focus();
+  }
+}
+
+/* ---------- findings filter ---------- */
+function filterFindings(sev){
+  document.querySelectorAll('#fbar .fbtn').forEach(b => b.classList.toggle('on', b.dataset.sev === sev));
+  let vis = 0, total = 0;
+  document.querySelectorAll('#findings-body [data-sevrow]').forEach(tr => {
+    total++;
+    const show = sev === 'ALL' || tr.dataset.sevrow === sev;
+    tr.style.display = show ? '' : 'none';
+    if(show) vis++;
+  });
+  const c = $('fcount');
+  if(c) c.textContent = total ? `showing ${vis}/${total}` : '';
+}
+
+/* ---------- events ---------- */
+$('login-form').addEventListener('submit', e => {
+  e.preventDefault();
+  token = $('token').value.trim(); $('token').value = '';
+  refresh();
+});
+$('refresh').addEventListener('click', refresh);
+$('nav-reviews').addEventListener('click', () => { selected = null; $('detail').hidden = true; refresh(); });
+document.addEventListener('click', async e => {
+  const fbtn = e.target.closest?.('.fbtn');
+  if(fbtn && selected){ filterFindings(fbtn.dataset.sev); return; }
+  if(e.target?.id === 'copy-link'){
+    const url = location.origin + location.pathname + '#review-' + selected;
+    try{ await navigator.clipboard.writeText(url); e.target.textContent = 'Copied!'; }
+    catch{ prompt('Copy review link:', url); return; }
+    setTimeout(() => e.target.textContent = 'Copy link', 1500); return;
+  }
+  if(e.target?.id === 'copy-curl'){
+    const cmd = `curl -sk -H "Authorization: Bearer $TOKEN" "${location.origin}/api/v1/reviews/${selected}" | python3 -m json.tool`;
+    try{ await navigator.clipboard.writeText(cmd); e.target.textContent = 'Copied!'; }
+    catch{ prompt('Copy curl:', cmd); return; }
+    setTimeout(() => e.target.textContent = 'Copy curl', 1500); return;
+  }
+  try{
+    const review = e.target.closest?.('[data-review]');
+    if(review){ await details(review.dataset.review); return; }
+    const artifact = e.target.closest?.('[data-artifact]');
+    if(artifact){
+      const data = await api(`/api/v1/reviews/${selected}/artifacts/${encodeURIComponent(artifact.dataset.artifact)}`);
+      const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], {type:'application/json'}));
+      const a = document.createElement('a'); a.href = url; a.download = artifact.dataset.artifact; a.click();
+      URL.revokeObjectURL(url); return;
+    }
+    if(e.target?.id === 'audit-btn'){
+      const d = await api(`/api/v1/reviews/${selected}/audit`);
+      const pre = $('audit-data'); pre.hidden = false; pre.textContent = JSON.stringify(d, null, 2);
+      pre.scrollIntoView({behavior:'smooth', block:'nearest'}); return;
+    }
+  }catch(err){ showError(err.message); }
+});
+
+document.addEventListener('submit', e => {
+  if(e.target?.id === 'chat-form'){
+    e.preventDefault();
+    const v = $('chat-input').value.trim();
+    if(v && selected) sendChat(v);
+  }
+});
+
+// deep link: #review-<id>
+if(location.hash.startsWith('#review-')){
+  const id = location.hash.slice(8);
+  const t = setInterval(() => {
+    if(token){ clearInterval(t); details(id).catch(() => {}); }
+  }, 500);
+  setTimeout(() => clearInterval(t), 30000);
+}
+
+setInterval(refresh, 15000);

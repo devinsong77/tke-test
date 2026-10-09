@@ -46,8 +46,19 @@ Use `scripts/gate_client.py`. PASS returns 0 and emits an ADO output variable. B
 
 `POST /api/v1/reviews/{review_id}/analysis` generates a plain-language analyst brief
 for a terminal review using an external LLM; `GET /api/v1/reviews/{review_id}/analysis`
-retrieves the cached brief. The brief is strictly advisory: it never influences the
-gate decision, which is computed deterministically from scanner evidence and policy.
-Requires the `ai_analyst` section in server `integrations.json` (base_url, api_key,
-model); without it the endpoints return 503/404. The dashboard shows the brief with
-an explicit "advisory only" label.
+retrieves the cached brief. **The brief is now generated automatically** when a review
+reaches a terminal decision (the worker triggers it best-effort after the durable
+decision is recorded); the manual POST remains as a fallback.
+
+The brief is strictly advisory: it never influences the gate decision, which is
+computed deterministically from scanner evidence and policy. Requires the `ai_analyst`
+section in server `integrations.json` (base_url, api_key, model); without it the
+endpoints return 503/404. The dashboard renders the brief as formatted Markdown
+with an explicit "advisory only" label.
+
+## AI chat (advisory only)
+
+`POST /api/v1/reviews/{review_id}/chat` with `{"message": "...", "history": [...]}` asks
+a follow-up question grounded on that review's findings; `GET /api/v1/reviews/{review_id}/chat`
+returns the stored conversation. Read-only: the analyst explains findings but can never
+modify the review, its decision, or any finding. History is capped server-side.

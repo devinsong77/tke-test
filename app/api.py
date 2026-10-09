@@ -181,8 +181,36 @@ def get_analysis(rid: str, auth=Depends(identity)):
     from app import analyst
     analysis = analyst.get_cached(rid)
     if analysis is None:
-        raise HTTPException(404, 'No analysis yet; POST to generate')
+        raise HTTPException(404, 'No analysis yet; it is generated automatically after the terminal decision')
     return analysis
+
+
+@app.post('/api/v1/reviews/{rid}/chat')
+async def chat_with_analyst(rid: str, request: Request, auth=Depends(identity)):
+    """Ask a follow-up question about a review's findings.
+
+    Read-only: the conversation is grounded on findings data and can never
+    modify the review, its decision, or any finding.
+    """
+    get_row(rid, auth[1])  # 404 if unknown / not visible to caller
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(422, 'Invalid JSON body')
+    from app import analyst
+    try:
+        return analyst.chat(rid, payload.get('message'), payload.get('history'))
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+
+
+@app.get('/api/v1/reviews/{rid}/chat')
+def get_chat_history(rid: str, auth=Depends(identity)):
+    get_row(rid, auth[1])
+    from app import analyst
+    return {'review_id': rid, 'messages': analyst.get_chat(rid)}
 
 
 @app.middleware('http')

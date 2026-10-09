@@ -22,6 +22,13 @@ def finish(rid, request, result, dest):
         con.execute('UPDATE reviews SET status=?,result=?,updated=? WHERE id=?',
                     (result['status'], json.dumps(result), time.time(), rid))
     core.audit(rid, 'review.finished', {'status': result['status'], 'reasons': result['reasons'], 'artifacts': artifacts})
+    # Advisory AI brief, generated asynchronously after the durable decision.
+    # Best-effort: never affects the gate outcome recorded above.
+    try:
+        from app import analyst
+        analyst.auto_generate(rid)
+    except Exception:
+        pass
 
 
 def run(row):
