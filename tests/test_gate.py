@@ -116,3 +116,10 @@ def test_artifact_integrity(setup):
     assert setup.get(url, headers=headers).status_code == 200
     (dest / 'decision.json').write_text('{"status":"PASS"}')
     assert setup.get(url, headers=headers).status_code == 409
+
+
+def test_maintainability_is_visible_but_not_security_block(setup):
+    quality = {'tool': 'sonarqube', 'category': 'CODE_SMELL', 'severity': 'HIGH'}
+    security = {'tool': 'sonarqube', 'category': 'VULNERABILITY', 'severity': 'HIGH'}
+    assert core.evaluate(payload(), [], clean_scans(), [quality], core.policy())['status'] == 'PASS'
+    assert core.evaluate(payload(), [], clean_scans(), [security], core.policy())['status'] == 'BLOCK'

@@ -105,11 +105,18 @@ def evaluate(request, inventory, scans, findings, active_policy):
             errors.append(f'N/A without reason: {item["path"]}')
     if errors:
         return {'status': 'ERROR', 'reasons': errors}
-    blocking = [f for f in findings if f['severity'] in active_policy['block_severities']
-                or (f['tool'] == 'gitleaks' and active_policy['block_any_secret'])]
+    blocking = [f for f in findings if is_blocking(f, active_policy)]
     reasons = [f'{len(blocking)} finding(s) violate policy'] if blocking else []
     if active_policy['require_sonar_quality_gate'] and scans['sonarqube'].get('quality_gate') != 'OK':
         reasons.append('SonarQube Quality Gate did not pass')
     return {'status': 'BLOCK' if reasons else 'PASS',
             'reasons': reasons or ['All required scans completed; no blocking policy violations'],
             'blocking_count': len(blocking)}
+
+
+def is_blocking(finding, active_policy):
+    if finding['tool'] == 'gitleaks' and active_policy['block_any_secret']:
+        return True
+    if finding['tool'] == 'sonarqube' and finding.get('category', 'VULNERABILITY') not in active_policy.get('sonar_block_issue_types', ['VULNERABILITY', 'BUG']):
+        return False
+    return finding['severity'] in active_policy['block_severities']

@@ -34,8 +34,8 @@ def docker(tool, source, rid, args, *, network='none', extra=None, timeout=600, 
     name = f'tke-scan-{rid}-{tool}'
     cmd = ['docker', 'run', '--rm', '--name', name, '--label', 'tke.scanner=true',
            '--network', network, '--cap-drop=ALL', '--security-opt=no-new-privileges',
-           '--user', f'{os.getuid()}:{os.getgid()}', '--memory=2g', '--cpus=2', '--pids-limit=256', '--read-only',
-           '--tmpfs', ('/tmp:rw,nosuid,nodev,exec,size=1g' if tool == 'sonarqube' else '/tmp:rw,nosuid,nodev,noexec,size=1g'), '-v', f'{source}:/src:ro', '-w', '/tmp']
+           '--user', f'{os.getuid()}:{os.getgid()}', ('--memory=4g' if tool == 'sonarqube' else '--memory=2g'), '--cpus=2', '--pids-limit=256', '--read-only',
+           '--tmpfs', (f'/scan-work:rw,nosuid,nodev,exec,size=1g,mode=0700,uid={os.getuid()},gid={os.getgid()}' if tool == 'sonarqube' else f'/scan-work:rw,nosuid,nodev,noexec,size=1g,mode=0700,uid={os.getuid()},gid={os.getgid()}'), '-v', f'{source}:/src:ro', '-w', '/scan-work', '-e', 'HOME=/scan-work']
     if extra:
         cmd += extra
     cmd += [IMAGES[tool]] + args
@@ -156,11 +156,11 @@ def scan_sonar(src, dest, rid, request, policy):
         env = dict(os.environ, SONAR_TOKEN=settings['token'])
         code, out, _ = docker('sonarqube', src, rid,
             [f'-Dsonar.host.url={settings["url"]}', f'-Dsonar.projectKey={project}',
-             '-Dsonar.projectBaseDir=/src', '-Dsonar.sources=.', '-Dsonar.working.directory=/tmp/analysis',
-             '-Dsonar.scanner.metadataFilePath=/tmp/report-task.txt',
+             '-Dsonar.python.version=3.12', '-Dsonar.projectBaseDir=/src', '-Dsonar.sources=.', '-Dsonar.working.directory=/scan-work/analysis',
+             '-Dsonar.scanner.metadataFilePath=/scan-work/report-task.txt',
              f'-Dsonar.scm.revision={request["commit_sha"]}', '-Dsonar.scm.exclusions.disabled=true',
-             '-Dsonar.exclusions=**/.git/**', '-Dsonar.qualitygate.wait=true', '-Dsonar.qualitygate.timeout=300'],
-            network='host', extra=['-e', 'SONAR_TOKEN', '-e', 'SONAR_USER_HOME=/tmp/sonar'], env=env)
+             '-Dsonar.exclusions=**/.git/**', '-Dsonar.javascript.node.maxspace=512', '-Dsonar.qualitygate.wait=true', '-Dsonar.qualitygate.timeout=300'],
+            network='host', extra=['-e', 'SONAR_TOKEN', '-e', 'SONAR_USER_HOME=/scan-work/sonar', '-e', 'SONAR_SCANNER_JAVA_OPTS=-Xmx512m'], env=env)
         # CLI returns nonzero for a failed Quality Gate; CE status and bound analysis remain authoritative.
         tasks = client.get('/api/ce/component', params={'component': project})
         tasks.raise_for_status()
@@ -175,6 +175,9 @@ def scan_sonar(src, dest, rid, request, policy):
         qg = client.get('/api/qualitygates/project_status', params={'analysisId': analysis_id})
         qg.raise_for_status()
         quality = qg.json()['projectStatus']
+        actual_conditions = {x['metricKey']: x.get('errorThreshold') for x in quality.get('conditions', [])}
+        if actual_conditions != policy['sonar_quality_gate']['conditions']:
+            raise ValueError('Sonar Quality Gate conditions differ from bound policy')
         issues = []
         page = 1
         while True:
@@ -199,7 +202,7 @@ def scan_sonar(src, dest, rid, request, policy):
         severity = {'BLOCKER': 'CRITICAL', 'CRITICAL': 'HIGH', 'MAJOR': 'MEDIUM', 'MINOR': 'LOW', 'INFO': 'INFO'}
         findings = [finding('sonarqube', x['rule'], severity.get(x.get('severity'), 'MEDIUM'), x['message'],
                             x.get('component', '').removeprefix(project + ':'), x.get('line', 0),
-                            remediation='Review the Sonar rule and resolve the issue.') for x in issues]
+                            remediation='Review the Sonar rule and resolve the issue.') | {'category': x.get('type', 'VULNERABILITY'), 'original_severity': x.get('severity')} for x in issues]
         return {'exit_code': code, 'analysis_id': analysis_id, 'quality_gate': quality['status'],
                 'project_key': project, 'revision': analysis['revision'], 'analyzed_files': files}, findings
 
@@ -213,16 +216,24 @@ def inventory(source):
             raise ValueError(f'Symlinks/submodules are outside approved pilot scope: {name}')
         tools = ['gitleaks']
         kind = 'supporting file'
-        if path.suffix in ('.py', '.js', '.ts', '.java', '.go', '.sh'):
+        not_applicable = {}
+        if path.suffix in ('.py', '.js', '.ts', '.java', '.go') and path.stat().st_size:
             tools.append('sonarqube')
             kind = 'source'
         if path.name.startswith('Dockerfile') or path.suffix == '.tf' or 'k8s/' in name or name.startswith('.github/workflows/'):
             tools.append('checkov')
             kind = 'configuration'
         if path.name in ('requirements.txt', 'package-lock.json', 'poetry.lock', 'go.sum', 'Pipfile.lock'):
-            tools.append('trivy')
+            if path.name == 'requirements.txt' and not any(line.strip() and not line.lstrip().startswith('#') for line in path.read_text().splitlines()):
+                not_applicable['trivy'] = 'Requirements file contains no dependency declarations'
+            else:
+                tools.append('trivy')
             kind = 'dependencies'
+        if path.suffix == '.sh':
+            checked(['bash', '-n', str(path)], timeout=10)
+            kind = 'shell script: syntax checked; secret scan; no supported Sonar SAST analyzer'
         records.append({'path': name, 'kind': kind, 'required_tools': tools, 'status': 'pending',
+                        'not_applicable': not_applicable,
                         'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
     if not records:
         raise ValueError('Empty source tree')

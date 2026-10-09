@@ -18,6 +18,7 @@ def main():
     if not base.startswith('https://'):
         raise ValueError('HTTPS is required')
     context = ssl.create_default_context(cafile=os.environ.get('GATE_CA_FILE') or None)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     token = os.environ['GATE_TOKEN']
     key = os.environ['GATE_HMAC_KEY']
     commit = os.environ['BUILD_SOURCEVERSION']

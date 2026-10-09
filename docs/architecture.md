@@ -36,3 +36,9 @@ Missing, malformed or failed mandatory reports, uncovered inputs, identity misma
 The initial pilot covers supported source, Dockerfile/IaC, lock/requirements files, current files and full history reachable from the requested commit. It does not claim dynamic runtime testing, detection of every secret or vulnerability, or examination of unreachable Git objects. Container image scanning and externally fetched modules require explicit extension and digest binding before adoption. Files outside specialized scanner domains still receive secret scanning; the inventory identifies which scanner applies. Unsupported languages and external references require review before onboarding a repository.
 
 No public fault-injection or policy-override endpoint exists. Fault injection requires host administrator access and a commit-bound marker under the root-owned configuration directory.
+
+## Sonar policy
+
+The server explicitly selects the `TKE Security Policy` Quality Gate for each review project. Its exact metric thresholds (`vulnerabilities > 0`, `bugs > 0`) are included in policy-v1 and verified against the analysis response. A mismatch is ERROR. Sonar's analysis API supplies the analyzed file list, which is cross-checked against required source inputs. Shell scripts receive syntax checking and secret scanning; this pilot does not claim shell SAST coverage from Sonar.
+
+Sonar findings preserve their native type and severity. Maintainability issues (`CODE_SMELL`) remain visible and import into Dojo, but do not independently block a security release. Bugs and vulnerabilities are governed by the explicit Sonar gate and security thresholds. This prevents a cognitive-complexity warning from being confused with a security vulnerability; no finding is suppressed or discarded.

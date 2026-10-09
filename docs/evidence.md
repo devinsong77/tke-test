@@ -28,3 +28,19 @@ For each run collect: triggering commit, full stage screenshot, Run URL/ID, POST
 - Configure private GitHub read access and the actual ADO project binding.
 - Verify scanner coverage against reported analyzed files, including all pilot inputs.
 - Complete real scan integrations, crash recovery, Dojo retry, and off-host restore demonstrations before claiming full delivery.
+
+## Server smoke evidence (2026-10-08, not ADO acceptance)
+
+| Outcome | Review ID | Source commit | Dojo engagement |
+|---|---|---|---|
+| PASS | `89583877102d494687cd67788ef5c306` | `f8e7ac8d8f9b803a5f796cfade69d8490c53b795` | 3, all four scanner imports completed |
+| BLOCK | `7442acd045054027bdedb0e36b145d74` | `4bd7178784caaf9cf1ebc1bf86069f0ba8f9a403` | 6, all four scanner imports completed |
+| ERROR | `10d46c416c32468a94d53b21fcd93cb4` | `8d7ac34a4a178badad18693e8c36c1ce1e3449bb` | 5, available reports imported |
+
+The BLOCK uses a deliberately nonfunctional high-entropy GitHub token pattern in an isolated branch. ERROR executes the real Trivy container with a nonexistent entrypoint and records the actual nonzero startup exit. The worker reports missing dependency coverage and ERROR. Earlier development runs are retained, including failed attempts; they are not acceptance evidence.
+
+The first PASS used Sonar's default Quality Gate. Subsequent reviews bind the explicit `TKE Security Policy` (zero vulnerabilities, zero bugs) into the versioned policy digest. Coverage metrics from executing application tests are not treated as server-side SAST evidence. Unit tests run during normal CI; scanners do not execute untrusted application code on the governance host.
+
+GitHub source: https://github.com/devinsong77/tke-test
+Azure DevOps organization/project created: https://dev.azure.com/devinsong77-tke/tke-test
+Actual Pipeline setup and Microsoft-hosted quota verification remain in progress.
