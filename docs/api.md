@@ -62,3 +62,12 @@ with an explicit "advisory only" label.
 a follow-up question grounded on that review's findings; `GET /api/v1/reviews/{review_id}/chat`
 returns the stored conversation. Read-only: the analyst explains findings but can never
 modify the review, its decision, or any finding. History is capped server-side.
+
+## Component health
+
+`GET /api/v1/components` (public, no auth) returns `{components: [...]}` where each entry is
+`{name, status, version, latency_ms, checked_at, error}`. Covers the gate API itself, the
+background worker (process check), SonarQube (`/api/system/status`), DefectDojo (HTTP 200/30x),
+and the Checkov/Trivy/Gitleaks scanner images (Docker image presence, falling back to the last
+terminal review's scanner outcome when the docker socket is not queryable). Every check has a
+5s timeout; one component failing never blocks the others. Read-only monitoring only.
