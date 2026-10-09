@@ -3,7 +3,6 @@ import hashlib
 import hmac
 import json
 import re
-import shutil
 import sqlite3
 import subprocess
 import time
@@ -99,25 +98,20 @@ def _check_http_component(name, url, parse):
         return _component(name, 'down', latency_ms=latency_ms, error=str(e)[:200])
 
 
-def _check_tool_component(name, binary, version_args):
-    """Check a scanner CLI is installed and reports a version. 5s timeout."""
+def _check_tool_component(name, image):
+    """Check a scanner's Docker image is present locally so the worker can run it. 5s timeout."""
     start = time.time()
-    path = shutil.which(binary)
-    if not path:
-        return _component(name, 'down', latency_ms=int((time.time() - start) * 1000),
-                          error=f'{binary} not found on PATH')
     try:
-        proc = subprocess.run([path, *version_args], capture_output=True, text=True, timeout=5)
-        out = (proc.stdout or proc.stderr or '').strip().splitlines()
-        version = out[0][:80] if out else None
+        proc = subprocess.run(['docker', 'image', 'inspect', image],
+                              capture_output=True, text=True, timeout=5)
         latency_ms = int((time.time() - start) * 1000)
-        if proc.returncode == 0 and version:
-            return _component(name, 'up', version=version, latency_ms=latency_ms)
-        return _component(name, 'degraded', version=version, latency_ms=latency_ms,
-                          error=f'{binary} exited {proc.returncode}')
+        if proc.returncode == 0:
+            return _component(name, 'up', version=image, latency_ms=latency_ms)
+        return _component(name, 'down', version=image, latency_ms=latency_ms,
+                          error=f'image not present locally: {image}')
     except Exception as e:
-        return _component(name, 'down', latency_ms=int((time.time() - start) * 1000),
-                          error=str(e)[:200])
+        return _component(name, 'down', version=image,
+                          latency_ms=int((time.time() - start) * 1000), error=str(e)[:200])
 
 
 def _check_worker_component():
@@ -156,9 +150,9 @@ def component_health(auth=Depends(optional_identity)):
         _check_worker_component(),
         _check_http_component('sonarqube', 'http://127.0.0.1:9000/api/system/status', _sonar_parse),
         _check_http_component('defectdojo', 'http://127.0.0.1:8080/', _dojo_parse),
-        _check_tool_component('checkov', 'checkov', ['--version']),
-        _check_tool_component('trivy', 'trivy', ['--version']),
-        _check_tool_component('gitleaks', 'gitleaks', ['version']),
+        _check_tool_component('checkov', 'bridgecrew/checkov:3.3.26'),
+        _check_tool_component('trivy', 'aquasec/trivy:0.75.0'),
+        _check_tool_component('gitleaks', 'ghcr.io/gitleaks/gitleaks:v8.30.1'),
     ]
     return {'components': components, 'checked_at': time.time()}
 
