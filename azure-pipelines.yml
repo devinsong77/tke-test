@@ -30,11 +30,6 @@ stages:
     timeoutInMinutes: 35
     steps:
     - checkout: self
-    - task: DownloadSecureFile@1
-      name: gateCA
-      inputs:
-        secureFile: tke-gate-ca.crt
-      displayName: Load trusted Gate certificate
     - script: python3 scripts/gate_client.py
       name: gate
       displayName: Submit review and wait for server decision
@@ -42,7 +37,7 @@ stages:
         GATE_URL: $(GATE_URL)
         GATE_TOKEN: $(GATE_TOKEN)
         GATE_HMAC_KEY: $(GATE_HMAC_KEY)
-        GATE_CA_FILE: $(gateCA.secureFilePath)
+        GATE_CA_FILE: $(Build.SourcesDirectory)/deploy/tke-gate-ca.crt
         GATE_REPOSITORY: tke-test
         ADO_RUN_URL: $(System.CollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)
     - publish: gate-evidence

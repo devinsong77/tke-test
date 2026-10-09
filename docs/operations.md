@@ -17,9 +17,9 @@ Endpoints: Dashboard/API `https://64.90.11.59:8443`, DefectDojo `:9443`, SonarQu
 
 ## Credentials
 
-`config/clients.json` contains distinct pipeline bearer/HMAC secrets and a read-only reviewer token. Deliver reviewer access privately. ADO stores pipeline credentials as secret variables, and `tke-gate-ca.crt` as a Secure File. Restrict resource authorization to the intended Pipeline. Tokens are never placed in a URL. The browser retains the read-only token in memory, not localStorage.
+`config/clients.json` contains distinct pipeline bearer/HMAC secrets and a read-only reviewer token. Deliver reviewer access privately. ADO stores pipeline credentials as secret variables, and the reviewed public trust certificate is versioned at `deploy/tke-gate-ca.crt`. Restrict resource authorization to the intended Pipeline. Tokens are never placed in a URL. The browser retains the read-only token in memory, not localStorage.
 
-The initializer creates service admin credentials. Further production hardening should replace bootstrap Sonar/Dojo administrator API tokens with narrowly scoped service accounts. The Docker worker is privileged through its socket access and is part of the trusted boundary.
+The initializer creates service admin credentials. After bootstrap, run `configure_sonar_policy.py`, `configure_sonar_permissions.py`, and `restrict_service_accounts.py` to install the bound Sonar policy and dedicated service identities. The Dojo importer is nonstaff and scoped to the pilot product; Sonar permissions are provision/analyze plus project-scoped access. The Docker worker is privileged through its socket access and is part of the trusted boundary.
 
 ## Diagnosis
 

@@ -39,6 +39,8 @@ No public fault-injection or policy-override endpoint exists. Fault injection re
 
 ## Sonar policy
 
-The server explicitly selects the `TKE Security Policy` Quality Gate for each review project. Its exact metric thresholds (`vulnerabilities > 0`, `bugs > 0`) are included in policy-v1 and verified against the analysis response. A mismatch is ERROR. Sonar's analysis API supplies the analyzed file list, which is cross-checked against required source inputs. Shell scripts receive syntax checking and secret scanning; this pilot does not claim shell SAST coverage from Sonar.
+The server provisions `TKE Security Policy` as the default Quality Gate for new review projects. Its exact metric thresholds (`vulnerabilities > 0`, `bugs > 0`) are included in policy-v1 and verified against the analysis response. A mismatch is ERROR. Sonar's analysis API supplies the analyzed file list, which is cross-checked against required source inputs. Shell scripts receive syntax checking and secret scanning; this pilot does not claim shell SAST coverage from Sonar.
 
 Sonar findings preserve their native type and severity. Maintainability issues (`CODE_SMELL`) remain visible and import into Dojo, but do not independently block a security release. Bugs and vulnerabilities are governed by the explicit Sonar gate and security thresholds. This prevents a cognitive-complexity warning from being confused with a security vulnerability; no finding is suppressed or discarded.
+
+Gitleaks retains full reachable-history scanning. The server policy excludes only the exact non-secret template literal `replace-with-32-character-key` from `.env.example`; it does not exempt a path, rule, commit, or arbitrary key. The policy snapshot and digest record this reviewed false positive.

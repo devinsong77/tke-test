@@ -3,6 +3,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -35,7 +36,7 @@ def docker(tool, source, rid, args, *, network='none', extra=None, timeout=600, 
     cmd = ['docker', 'run', '--rm', '--name', name, '--label', 'tke.scanner=true',
            '--network', network, '--cap-drop=ALL', '--security-opt=no-new-privileges',
            '--user', f'{os.getuid()}:{os.getgid()}', ('--memory=4g' if tool == 'sonarqube' else '--memory=2g'), '--cpus=2', '--pids-limit=256', '--read-only',
-           '--tmpfs', (f'/scan-work:rw,nosuid,nodev,exec,size=1g,mode=0700,uid={os.getuid()},gid={os.getgid()}' if tool == 'sonarqube' else f'/scan-work:rw,nosuid,nodev,noexec,size=1g,mode=0700,uid={os.getuid()},gid={os.getgid()}'), '-v', f'{source}:/src:ro', '-w', '/scan-work', '-e', 'HOME=/scan-work']
+           '--tmpfs', (f'/scan-work:rw,nosuid,nodev,exec,size=1g,mode=0700,uid={os.getuid()},gid={os.getgid()}' if tool == 'sonarqube' else f'/scan-work:rw,nosuid,nodev,noexec,size=1g,mode=0700,uid={os.getuid()},gid={os.getgid()}'), '-v', f'{source}:/src:ro', '-w', '/scan-work', '-e', 'HOME=/scan-work', '-e', 'TMPDIR=/scan-work']
     if extra:
         cmd += extra
     cmd += [IMAGES[tool]] + args
@@ -64,12 +65,20 @@ def finding(tool, rule, severity, title, file='', line=0, description='', remedi
 
 
 def scan_gitleaks(src, dest, rid, request, policy):
+    # Server policy only: exact literal placeholders, never repository-supplied exclusions.
+    config = dest / 'gitleaks-policy.toml'
+    patterns = [f'^{re.escape(value)}$' for value in policy.get('gitleaks_known_placeholders', [])]
+    text = '[extend]\nuseDefault = true\n'
+    if patterns:
+        text += '\n[allowlist]\ndescription = "Reviewed non-secret template literals"\nregexTarget = "secret"\nregexes = [' + ', '.join("'''" + value + "'''" for value in patterns) + ']\n'
+    config.write_text(text)
     combined = []
     exits = []
     for mode in ('git', 'dir'):
         code, out, _ = docker('gitleaks', src, rid,
             [mode, '/src', *(['--log-opts=' + request['commit_sha']] if mode == 'git' else []), '--redact=100', '--ignore-gitleaks-allow', '--report-format=json',
-             '--report-path=/dev/stdout', '--exit-code=10', '--no-banner'])
+             '--report-path=/dev/stdout', '--exit-code=10', '--no-banner', '--config=/policy.toml'],
+            extra=['-v', f'{config}:/policy.toml:ro'])
         if code not in (0, 10):
             raise RuntimeError(f'Gitleaks {mode} failed (exit {code})')
         report = json.loads(out)

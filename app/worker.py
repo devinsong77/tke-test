@@ -11,6 +11,8 @@ from app import core, scanners
 
 
 def finish(rid, request, result, dest):
+    deployment = core.CONFIG / 'deployment.json'
+    result['server_deployment'] = json.loads(deployment.read_text()) if deployment.exists() else {'revision': 'development-unpinned'}
     result.update(review_id=rid, commit_sha=request['commit_sha'], policy_version=request['policy_version'],
                   policy_digest=request['policy_digest'], finished_at=time.time())
     core.atomic_json(dest / 'decision.json', result)

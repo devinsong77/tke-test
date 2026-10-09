@@ -33,7 +33,7 @@ The original task description remains at `/governance-lab.html` on the assigned 
 1. Create a candidate-owned organization/project and confirm Microsoft-hosted Agent quota.
 2. Connect this GitHub repository and select `azure-pipelines.yml`.
 3. Add `GATE_URL=https://64.90.11.59:8443`; add secret variables `GATE_TOKEN` and `GATE_HMAC_KEY` from the host's pipeline client configuration.
-4. Upload the server's public trust certificate as Secure File `tke-gate-ca.crt`, restricted to this pipeline.
+4. Verify the public trust certificate at `deploy/tke-gate-ca.crt`; the client uses it without disabling TLS validation.
 5. Register the exact ADO project URL prefix in the server's repository configuration.
 6. Protect main, pipeline changes and secret access; then run real PASS, BLOCK and ERROR scenarios.
 

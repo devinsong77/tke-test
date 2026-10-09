@@ -25,13 +25,13 @@ if settings['sonar'].get('principal') != 'governance-worker':
 if settings['dojo'].get('principal') != 'governance-importer':
     script=f'''
 from django.contrib.auth import get_user_model
-from dojo.models import Product, Product_Member
+from dojo.models import Product, Dojo_User
 from rest_framework.authtoken.models import Token
 user, created = get_user_model().objects.get_or_create(username="governance-importer", defaults={{"is_staff": False, "is_superuser": False, "is_active": True}})
 if created:
  user.set_unusable_password(); user.save()
 product = Product.objects.get(pk={int(settings['dojo']['product_id'])})
-Product_Member.objects.get_or_create(product=product, user=user, defaults={{"role_id": 1}})
+product.authorized_users.add(Dojo_User.objects.get(pk=user.pk))
 token, _ = Token.objects.get_or_create(user=user)
 print("SERVICE_TOKEN=" + token.key)
 '''

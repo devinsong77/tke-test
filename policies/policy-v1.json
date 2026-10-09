@@ -25,5 +25,8 @@
   "sonar_block_issue_types": [
     "VULNERABILITY",
     "BUG"
+  ],
+  "gitleaks_known_placeholders": [
+    "replace-with-32-character-key"
   ]
 }
