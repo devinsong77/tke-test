@@ -160,6 +160,31 @@ def artifact(rid: str, name: str, auth=Depends(identity)):
     return FileResponse(path, media_type='application/json', filename=name)
 
 
+@app.post('/api/v1/reviews/{rid}/analysis', status_code=202)
+def request_analysis(rid: str, auth=Depends(identity)):
+    """Trigger AI advisory analysis. Read-only vs the gate: never changes the decision."""
+    get_row(rid, auth[1])  # 404 if unknown / not visible to caller
+    from app import analyst
+    try:
+        analysis = analyst.generate_and_store(rid)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    return {'review_id': rid, 'status': 'ready', 'model': analysis['model'],
+            'disclaimer': analysis['disclaimer']}
+
+
+@app.get('/api/v1/reviews/{rid}/analysis')
+def get_analysis(rid: str, auth=Depends(identity)):
+    get_row(rid, auth[1])
+    from app import analyst
+    analysis = analyst.get_cached(rid)
+    if analysis is None:
+        raise HTTPException(404, 'No analysis yet; POST to generate')
+    return analysis
+
+
 @app.middleware('http')
 async def headers(request, call_next):
     response = await call_next(request)
