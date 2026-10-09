@@ -10,52 +10,30 @@
 <body>
 <div class="app">
   <aside class="sidebar">
-    <a class="brand" href="/">TKE<span>Governance Lab</span></a>
-    <nav>
-      <p class="nav-label">Workspace</p>
-      <button class="nav-item active" id="nav-reviews">
-        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 1.5l6 3.5v6L8 14.5 2 11V5z"/><path d="M8 1.5V8m0 0l6-3.5M8 8L2 4.5"/></svg>
+    <a class="brand" href="#reviews">TKE<span>Governance</span></a>
+    <nav aria-label="Primary">
+      <button class="nav-item" id="nav-reviews">
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 1.5l6 3.5v6L8 14.5 2 11V5z"/><path d="M8 1.5V8m0 0l6-3.5M8 8L2 4.5" stroke="#fff" stroke-width="1.4" fill="none"/></svg>
         Reviews
       </button>
       <button class="nav-item" id="nav-components">
-        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2.4M8 12.1v2.4M1.5 8h2.4M12.1 8h2.4M3.4 3.4l1.7 1.7M10.9 10.9l1.7 1.7M12.6 3.4l-1.7 1.7M5.1 10.9l-1.7 1.7"/></svg>
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2.4M8 12.1v2.4M1.5 8h2.4M12.1 8h2.4M3.4 3.4l1.7 1.7M10.9 10.9l1.7 1.7M12.6 3.4l-1.7 1.7M5.1 10.9l-1.7 1.7"/></svg>
         Components
       </button>
     </nav>
-    <div class="sidebar-foot">
-      <span class="pulse"></span>Server-side governance
-      <p>Four scanners. One accountable decision.</p>
-    </div>
   </aside>
 
   <main class="main">
-    <header class="topbar">
-      <span class="crumb">Security / Delivery assurance</span>
-      <button id="refresh" class="btn btn-ghost">Refresh</button>
-    </header>
-
-    <section class="hero">
-      <div>
-        <p class="eyebrow">Security delivery governance</p>
-        <h1>Trust every release.</h1>
-        <p class="lede">Trace the decision from commit to evidence.</p>
-      </div>
-      <span class="pill">Fail-closed by design</span>
-    </section>
-
     <div id="message" class="alert" role="status" aria-live="polite" hidden></div>
 
-    <div id="workspace">
+    <!-- ============ Reviews overview ============ -->
+    <div id="view-reviews">
+      <div class="page-head">
+        <h1>Reviews</h1>
+        <button id="refresh" class="btn">Refresh</button>
+      </div>
       <section class="stats" id="metrics" aria-label="Review statistics"></section>
-
       <section class="card">
-        <div class="card-head">
-          <div>
-            <p class="eyebrow">Auditable execution</p>
-            <h2>Recent reviews</h2>
-          </div>
-          <span class="muted small" id="updated"></span>
-        </div>
         <div class="table-wrap">
           <table class="tbl">
             <thead><tr>
@@ -65,32 +43,67 @@
             <tbody id="reviews"></tbody>
           </table>
         </div>
-        <p id="empty" class="muted" hidden>No reviews yet. Submit a signed request from your pipeline.</p>
+        <p id="empty" class="muted" hidden>No reviews yet.</p>
       </section>
-
-      <section id="detail" class="card" hidden></section>
+      <p class="muted meta-line" id="updated"></p>
     </div>
 
-    <div id="components-view" hidden>
-      <div id="comp-banner" class="alert alert-error" role="alert" hidden></div>
-      <section class="card">
-        <div class="card-head">
-          <div>
-            <p class="eyebrow">Infrastructure health</p>
-            <h2>Components</h2>
-          </div>
-          <div style="display:flex;gap:8px;align-items:center">
-            <span class="muted small" id="comp-updated"></span>
-            <button id="comp-refresh" class="btn btn-ghost">Refresh</button>
-          </div>
+    <!-- ============ Review detail ============ -->
+    <div id="view-detail" hidden>
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+        <a href="#reviews">Reviews</a><span class="sep">/</span><span id="crumb-id"></span>
+      </nav>
+      <div class="detail-head">
+        <div class="detail-title">
+          <h1 id="detail-title"></h1>
+          <div class="review-id" id="detail-rid"></div>
         </div>
-        <div id="comp-grid" class="comp-grid"></div>
-        <p id="comp-empty" class="muted" hidden>Could not load component health.</p>
-      </section>
+        <div class="detail-actions">
+          <button id="ask-ai" class="btn btn-primary">Ask AI</button>
+          <button id="copy-link" class="btn">Copy link</button>
+          <button id="copy-curl" class="btn">Copy curl</button>
+        </div>
+      </div>
+      <nav class="tabs" id="detail-tabs" role="tablist" aria-label="Review sections"></nav>
+      <div id="detail-panel"></div>
     </div>
 
-    <footer class="foot">TKE Interview Lab · Evidence first · Timestamps in your local timezone</footer>
+    <!-- ============ Components ============ -->
+    <div id="view-components" hidden>
+      <div class="page-head">
+        <h1>Components</h1>
+        <div class="head-actions">
+          <span class="muted meta-line" id="comp-updated"></span>
+          <button id="comp-refresh" class="btn">Refresh</button>
+        </div>
+      </div>
+      <div id="comp-banner" class="alert" role="alert" hidden></div>
+      <div id="comp-grid" class="comp-grid"></div>
+      <p id="comp-empty" class="muted" hidden>Could not load component health.</p>
+    </div>
   </main>
+
+  <!-- ============ AI side panel ============ -->
+  <aside id="ai-panel" class="ai-panel" aria-hidden="true" aria-label="AI analyst">
+    <header class="ai-panel-head">
+      <div class="ai-panel-title">
+        <h2>AI Analyst</h2>
+        <span class="ai-tag">Advisory only</span>
+      </div>
+      <button id="ai-close" class="icon-btn" aria-label="Close panel">✕</button>
+    </header>
+    <div class="ai-panel-body">
+      <section id="ai-brief" aria-label="Analyst brief"></section>
+      <section class="chat" aria-label="Analyst chat">
+        <div class="chat-log" id="chat-log"></div>
+        <form class="chat-form" id="chat-form">
+          <input id="chat-input" type="text" placeholder="Ask about the findings…" autocomplete="off" maxlength="2000" aria-label="Ask about the findings">
+          <button class="btn btn-primary" type="submit" id="chat-send">Send</button>
+        </form>
+      </section>
+    </div>
+  </aside>
+  <div id="ai-scrim" class="scrim" hidden></div>
 </div>
 </body>
 </html>
